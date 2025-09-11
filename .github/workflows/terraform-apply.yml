@@ -102,7 +102,14 @@ jobs:
         env:
           TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
         run: terraform init -input=false
-
+      - name: Debug digest item
+        run: |
+          aws dynamodb get-item \
+          --region eu-west-1 \
+          --table-name terraform-locks-TST \
+          --key '{"LockID":{"S":"terraformstatetst/terraform-apply/infra/terraform.tfstate-md5"}}' \
+          --output table || true
+ 
       - name: Terraform validate
         run: terraform validate -no-color
 
