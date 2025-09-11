@@ -9,13 +9,13 @@ on:
   pull_request:
     branches: [ "**" ]
     paths:
-      - "infra/**"
+      - "Terraform-apply/**"
   workflow_dispatch:
     inputs:
       working_directory:
         description: "Dossier Terraform"
         required: true
-        default: "infra"
+        default: ""
       var_file:
         description: "Chemin du .tfvars (optionnel)"
         required: false
