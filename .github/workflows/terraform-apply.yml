@@ -143,3 +143,19 @@ jobs:
         env:
           TF_CLI_ARGS_apply: "-auto-approve -no-color"
         run: terraform apply -auto-approve tfplan
+
+      - name: Download previous tfstate (if exists)
+        uses: actions/download-artifact@v4
+        with:
+          name: tfstate
+          path: infra/
+
+        # ... terraform init/plan/apply ici ...
+
+      - name: Upload updated tfstate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfstate
+          path: infra/terraform.tfstate
+
