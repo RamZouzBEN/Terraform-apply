@@ -4,8 +4,8 @@ provider "aws" {
 
 
 data "aws_ami" "custom_ami" {
-  most_recent      = true
-  owners           = ["self"]
+  most_recent = true
+  owners      = ["self"]
   filter {
     name   = "name"
     values = ["Windows*"]
@@ -25,18 +25,18 @@ data "aws_subnet" "selected" {
 
 data "aws_security_group" "selected" {
   filter {
-    name  = "tag:Name"
+    name   = "tag:Name"
     values = ["Default"]
   }
 }
 
 data "aws_key_pair" "deployer" {
-    key_name = "ec2-instances-2025"
+  key_name = "ec2-instances-2025"
 }
 
 data "aws_iam_instance_profile" "selected" {
 
-   name   = "EC2InstanceProfile"
+  name = "EC2InstanceProfile"
 
 }
 
@@ -100,19 +100,19 @@ resource "aws_instance" "virtual_machine_test" {
                         </powershell>
                         EOF
   subnet_id                   = data.aws_subnet.selected.id
-  vpc_security_group_ids     = [data.aws_security_group.selected.id]
+  vpc_security_group_ids      = [data.aws_security_group.selected.id]
   associate_public_ip_address = false
   iam_instance_profile        = data.aws_iam_instance_profile.selected.name
 
   tags = merge(
-      {"ENV" = "DEV"},
-      {"ROLE" = "IIS"}
-    )
+    { "ENV" = "DEV" },
+    { "ROLE" = "IIS" }
+  )
 
   metadata_options {
-    instance_metadata_tags      = "enabled"
+    instance_metadata_tags = "enabled"
   }
-} 
+}
 
 
 
