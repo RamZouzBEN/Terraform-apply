@@ -37,7 +37,7 @@ data "aws_iam_instance_profile" "selected" {
 }
 
 
-resource "aws_instance" "virtual_machine_test" {
+resource "aws_instance" "virtual_machine_test_v1" {
   ami                         = data.aws_ami.custom_ami.id
   instance_type               = "m5.xlarge"
   key_name                    = data.aws_key_pair.deployer.key_name
@@ -109,6 +109,7 @@ resource "aws_instance" "virtual_machine_test" {
     instance_metadata_tags = "enabled"
   }
 }
+
 
 
 
