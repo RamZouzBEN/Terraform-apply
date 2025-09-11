@@ -1,3 +1,8 @@
+provider "aws" {
+  region = "eu-west-1"
+}
+
+
 data "aws_ami" "custom_ami" {
   most_recent      = true
   owners           = ["self"]
@@ -104,4 +109,5 @@ resource "aws_instance" "virtual_machine_test" {
     instance_metadata_tags      = "enabled"
   }
 } 
+
 
