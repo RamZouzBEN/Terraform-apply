@@ -1,0 +1,149 @@
+name: terraform-aws
+
+on:
+  push:
+    branches: [ "**" ]
+    paths:
+      - "Terraform-apply/**"
+      - ".github/workflows/terraform-aws.yml"
+  pull_request:
+    branches: [ "**" ]
+    paths:
+      - "infra/**"
+  workflow_dispatch:
+    inputs:
+      working_directory:
+        description: "Dossier Terraform"
+        required: true
+        default: "infra"
+      var_file:
+        description: "Chemin du .tfvars (optionnel)"
+        required: false
+        default: ""
+      apply:
+        description: "Exécuter terraform apply ? (true/false)"
+        required: true
+        default: "false"
+
+permissions:
+  id-token: write   # OIDC
+  contents: read
+  pull-requests: write   # pour commenter le plan sur les PR
+
+env:
+  AWS_REGION: eu-west-1
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+concurrency:
+  group: tf-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.5"
+
+      # --- Cache des plugins/providers Terraform ---
+      - name: Restore Terraform plugin cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.terraform.d/plugin-cache
+            ${{ github.event.inputs.working_directory || 'infra' }}/.terraform
+          key: tf-${{ runner.os }}-${{ hashFiles('**/*.tf', '**/.terraform.lock.hcl') }}
+          restore-keys: |
+            tf-${{ runner.os }}-
+
+      - name: Set working directory
+        id: paths
+        run: |
+          WD="${{ github.event.inputs.working_directory || 'infra' }}"
+          echo "wd=$WD" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform fmt
+        working-directory: ${{ steps.paths.outputs.wd }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        working-directory: ${{ steps.paths.outputs.wd }}
+        env:
+          TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        working-directory: ${{ steps.paths.outputs.wd }}
+        run: terraform validate -no-color
+
+      - name: Terraform plan
+        id: plan
+        working-directory: ${{ steps.paths.outputs.wd }}
+        env:
+          # Tout secret passé en TF_VAR_* est invisible dans les logs
+          # Exemple: TF_VAR_db_password dans les Secrets GitHub
+          TF_CLI_ARGS_plan: "-no-color"
+        run: |
+          set -euo pipefail
+          VAR_FILE="${{ github.event.inputs.var_file || '' }}"
+          if [ -n "$VAR_FILE" ]; then
+            terraform plan -out=tfplan -var-file="$VAR_FILE"
+          else
+            terraform plan -out=tfplan
+          fi
+          terraform show -no-color tfplan > tfplan.txt
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: thollander/actions-comment-pull-request@v3
+        with:
+          message: |
+            ### Terraform plan
+            ```
+            ${{ steps.plan.outcome == 'success' && 'Plan succeeded' || 'Plan failed' }}
+            ```
+            <details><summary>Show plan</summary>
+
+            ```diff
+            ${{ steps.plan.outcome == 'success' && join(fromJSON('[""]'), '') || '' }}
+            ```
+            </details>
+          filePath: ${{ steps.paths.outputs.wd }}/tfplan.txt
+
+      - name: Save Terraform plugin cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.terraform.d/plugin-cache
+            ${{ steps.paths.outputs.wd }}/.terraform
+          key: tf-${{ runner.os }}-${{ hashFiles('**/*.tf', '**/.terraform.lock.hcl') }}
+
+      # --- Apply automatique uniquement si on est sur main OU si workflow_dispatch apply=true ---
+      - name: Terraform apply
+        if: >
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/main'))
+          || (github.event_name == 'workflow_dispatch' && github.event.inputs.apply == 'true')
+        working-directory: ${{ steps.paths.outputs.wd }}
+        env:
+          TF_CLI_ARGS_apply: "-auto-approve -no-color"
+        run: |
+          set -euo pipefail
+          terraform apply -auto-approve tfplan
