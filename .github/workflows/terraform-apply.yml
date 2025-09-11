@@ -151,12 +151,14 @@ jobs:
           TF_CLI_ARGS_apply: "-auto-approve -no-color"
         run: terraform apply -auto-approve tfplan
 
-      # 2️⃣ Sauvegarder le tfstate mis à jour (même si le job échoue)
       - name: Upload updated tfstate
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tfstate
+          name: tfstate-${{ github.ref_name }}     # ← par branche/environnement
           path: |
             infra/terraform.tfstate
             infra/terraform.tfstate.backup
+            retention-days: 30                        # ← évite l’expiration trop rapide
+            if-no-files-found: ignore
+
