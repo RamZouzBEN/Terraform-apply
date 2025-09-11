@@ -10,7 +10,7 @@ data "aws_ami" "custom_ami" {
 data "aws_subnet" "selected" {
   filter {
     name   = "tag:Name"
-    values = ["PRIV-TRZ-CEL01-A"] # insert values here
+    values = ["My-vault-vpc-subnet-private1-eu-west-1a"] # insert values here
   }
 }
 
@@ -22,12 +22,12 @@ data "aws_security_group" "selected" {
 }
 
 data "aws_key_pair" "deployer" {
-    key_name = "Instance-Access"
+    key_name = "ec2-instances-2025"
 }
 
 data "aws_iam_instance_profile" "selected" {
 
-   name   = "HRSPRINT-INSTANCE-PROFILE"
+   name   = "EC2InstanceProfile"
 
 }
 
@@ -96,7 +96,7 @@ resource "aws_instance" "virtual_machine_test" {
   iam_instance_profile        = data.aws_iam_instance_profile.selected.name
 
   tags = merge(
-      {"ENV" = "PROD"},
+      {"ENV" = "DEV"},
       {"ROLE" = "IIS"}
     )
 
@@ -104,3 +104,4 @@ resource "aws_instance" "virtual_machine_test" {
     instance_metadata_tags      = "enabled"
   }
 } 
+
