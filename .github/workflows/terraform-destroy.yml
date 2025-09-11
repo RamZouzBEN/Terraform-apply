@@ -36,14 +36,6 @@ jobs:
         working-directory: .
 
     steps:
-      # 1) Safety check à la racine
-      - name: Safety confirmation
-        run: |
-          if [ "${{ github.event.inputs.confirm }}" != "DESTROY-MY-INFRA" ]; then
-            echo "Refusé: tu dois confirmer en saisissant exactement 'DESTROY-MY-INFRA'."
-            exit 1
-          fi
-
       # 2) Checkout à la racine
       - name: Checkout
         uses: actions/checkout@v4
