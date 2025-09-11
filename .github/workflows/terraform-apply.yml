@@ -83,6 +83,25 @@ jobs:
         working-directory: ${{ steps.paths.outputs.wd }}
         run: terraform fmt -check -recursive
 
+       # Vérifie sur PR
+      - name: Terraform fmt (check on PR)
+        if: github.event_name == 'pull_request'
+        run: terraform fmt -check -recursive
+
+       # Auto-fix sur push: format + commit
+      - name: Terraform fmt (auto-fix on push)
+        if: github.event_name != 'pull_request'
+        run: terraform fmt -recursive
+
+      - name: Commit formatted files (push only)
+        if: github.event_name != 'pull_request'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(fmt): terraform auto-format"
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
+
+
       - name: Terraform init
         working-directory: ${{ steps.paths.outputs.wd }}
         env:
