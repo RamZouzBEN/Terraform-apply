@@ -6,8 +6,8 @@ provider "aws" {
 data "aws_ami" "custom_ami" {
   most_recent = true
   owners      = ["self"]
- tags = {
-    Name   = "Windows*"
+  tags = {
+    Name      = "Windows*"
     BuildTime = "2025*"
   }
 }
