@@ -4,16 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       var_file:
-        description: "Chemin du .tfvars (relatif à infra/, ex: prod.tfvars) — optionnel"
+        description: "Chemin du .tfvars (relatif à infra/, ex: prod.tfvars)"
         required: false
         default: ""
       target:
         description: "Optionnel: -target=... (module/ressource). Laisser vide pour tout détruire."
         required: false
-        default: ""
-      confirm:
-        description: "Tape EXACTEMENT: DESTROY-MY-INFRA"
-        required: true
         default: ""
 
 permissions:
@@ -33,12 +29,14 @@ jobs:
   destroy:
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment }}
+    # par défaut on reste à la racine; on passera en infra/ à partir de Terraform init
     defaults:
       run:
         shell: bash
-        working-directory: infra
+        working-directory: .
 
     steps:
+      # 1) Safety check à la racine
       - name: Safety confirmation
         run: |
           if [ "${{ github.event.inputs.confirm }}" != "DESTROY-MY-INFRA" ]; then
@@ -46,9 +44,11 @@ jobs:
             exit 1
           fi
 
+      # 2) Checkout à la racine
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 3) Vérifier que infra/ existe (debug utile)
       - name: Assert 'infra/' exists & show tree
         run: |
           echo "PWD: $(pwd)"
@@ -57,17 +57,20 @@ jobs:
           echo "Infra content:"
           ls -la infra || (echo "::error::Le dossier 'infra' est introuvable à la racine du repo." && exit 1)
 
+      # 4) AWS OIDC creds
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # 5) Terraform
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.13.2"
+          terraform_version: "1.8.5"
 
+      # 6) Cache providers/plugin (chemins vers infra/)
       - name: Restore Terraform plugin cache
         uses: actions/cache/restore@v4
         with:
@@ -79,11 +82,13 @@ jobs:
             tf-${{ runner.os }}-
 
       - name: Terraform init
+        working-directory: infra
         env:
           TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
         run: terraform init -input=false
 
       - name: Terraform plan -destroy (dry-run)
+        working-directory: infra
         env:
           TF_CLI_ARGS_plan: "-no-color"
         run: |
@@ -105,6 +110,7 @@ jobs:
           path: infra/tfplan-destroy.txt
 
       - name: Terraform destroy (apply)
+        working-directory: infra
         env:
           TF_CLI_ARGS_destroy: "-no-color"
         run: |
