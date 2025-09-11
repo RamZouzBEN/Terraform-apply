@@ -90,6 +90,7 @@ jobs:
           commit_message: "chore(fmt): terraform auto-format"
           commit_user_name: "github-actions[bot]"
           commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
+          file_pattern: "**/*.tf"     # <-- évite d’ajouter .terraform/
       - name: Terraform init
         env:
           TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
