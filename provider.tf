@@ -9,6 +9,7 @@ data "aws_ssm_parameter" "ad_password" {
 
 data "aws_ami" "ec2windows" {
   most_recent      = true
-  owners           = ["400708341129"]
+  owners           = ["864899841353"]
   
+
 }
