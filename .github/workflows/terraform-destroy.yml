@@ -39,13 +39,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1️⃣ Télécharger le tfstate depuis le workflow de déploiement
-      - name: Download previous tfstate (if exists)
-        uses: actions/download-artifact@v4
+# Option: paramètre pour choisir la branche à détruire (par défaut main)
+# on.workflow_dispatch.inputs.branch -> default: "main"
+
+      - name: Download tfstate from last successful apply run
+        uses: dawidd6/action-download-artifact@v6
         with:
-          name: tfstate
+          repo: ${{ github.repository }}
+          workflow: terraform-aws.yml        # ← nom du fichier du workflow d'apply
+          workflow_conclusion: success
+          branch: ${{ inputs.branch || 'main' }}
+          name: tfstate-${{ inputs.branch || 'main' }}  # doit matcher le nom côté upload
           path: infra/
-        continue-on-error: true
+
+      - name: Verify tfstate presence
+        run: |
+          echo "Content of infra/:"
+          ls -la infra || true
+          test -f infra/terraform.tfstate && echo "OK: tfstate trouvé" || (echo "::warning::Pas de tfstate local (backend distant ? mauvais nom d'artifact ?)"; exit 0)
+
 
       - name: Assert 'infra/' exists & show tree
         working-directory: .
