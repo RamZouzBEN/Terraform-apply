@@ -4,24 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       var_file:
-        description: "Chemin du .tfvars (relatif à infra/, ex: prod.tfvars). Laisser vide si aucun."
+        description: "Chemin du .tfvars (relatif à infra/, ex: prod.tfvars) — optionnel"
         required: false
         default: ""
       target:
-        description: "Cible optionnelle (-target=...). Laisser vide pour détruire tout."
+        description: "Optionnel: -target=... (module/ressource). Laisser vide pour tout détruire."
         required: false
         default: ""
       confirm:
-        description: "Tape EXACTEMENT: DESTROY-MY-INFRA pour confirmer la destruction"
+        description: "Tape EXACTEMENT: DESTROY-MY-INFRA"
         required: true
         default: ""
       environment:
-        description: "Nom d'environnement GitHub (peut être protégé pour approbation)"
+        description: "Environnement GitHub (protégé) pour approbation"
         required: true
         default: "prod"
 
 permissions:
-  id-token: write    # OIDC
+  id-token: write
   contents: read
 
 env:
@@ -36,14 +36,14 @@ concurrency:
 jobs:
   destroy:
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment }}   # protège via Environments si tu veux une approbation
+    environment: ${{ github.event.inputs.environment }}
     defaults:
       run:
         shell: bash
         working-directory: infra
 
     steps:
-      - name: Safety check
+      - name: Safety confirmation
         run: |
           if [ "${{ github.event.inputs.confirm }}" != "DESTROY-MY-INFRA" ]; then
             echo "Refusé: tu dois confirmer en saisissant exactement 'DESTROY-MY-INFRA'."
@@ -52,6 +52,14 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Assert 'infra/' exists & show tree
+        run: |
+          echo "PWD: $(pwd)"
+          echo "Repo root content:"
+          ls -la .
+          echo "Infra content:"
+          ls -la infra || (echo "::error::Le dossier 'infra' est introuvable à la racine du repo." && exit 1)
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -62,9 +70,8 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.8.5"
+          terraform_version: "1.13.2"
 
-      # Cache des providers Terraform (accélère init)
       - name: Restore Terraform plugin cache
         uses: actions/cache/restore@v4
         with:
@@ -80,21 +87,19 @@ jobs:
           TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
         run: terraform init -input=false
 
-      # (Optionnel) Voir ce qui va être détruit avant d'exécuter le destroy
       - name: Terraform plan -destroy (dry-run)
         env:
           TF_CLI_ARGS_plan: "-no-color"
         run: |
           set -euo pipefail
-          VARS=""
+          ARGS=()
           if [ -n "${{ github.event.inputs.var_file }}" ]; then
-            VARS="$VARS -var-file=${{ github.event.inputs.var_file }}"
+            ARGS+=("-var-file=${{ github.event.inputs.var_file }}")
           fi
           if [ -n "${{ github.event.inputs.target }}" ]; then
-            VARS="$VARS -target=${{ github.event.inputs.target }}"
+            ARGS+=("-target=${{ github.event.inputs.target }}")
           fi
-          # Plan de destruction (dry-run)
-          terraform plan -destroy -out=tfplan.destroy $VARS
+          terraform plan -destroy -out=tfplan.destroy "${ARGS[@]}"
           terraform show -no-color tfplan.destroy > tfplan-destroy.txt
 
       - name: Upload destroy plan (artifact)
@@ -103,20 +108,19 @@ jobs:
           name: tfplan-destroy
           path: infra/tfplan-destroy.txt
 
-      # Destruction réelle (auto-approve)
       - name: Terraform destroy (apply)
         env:
           TF_CLI_ARGS_destroy: "-no-color"
         run: |
           set -euo pipefail
-          VARS=""
+          ARGS=()
           if [ -n "${{ github.event.inputs.var_file }}" ]; then
-            VARS="$VARS -var-file=${{ github.event.inputs.var_file }}"
+            ARGS+=("-var-file=${{ github.event.inputs.var_file }}")
           fi
           if [ -n "${{ github.event.inputs.target }}" ]; then
-            VARS="$VARS -target=${{ github.event.inputs.target }}"
+            ARGS+=("-target=${{ github.event.inputs.target }}")
           fi
-          terraform destroy -auto-approve $VARS
+          terraform destroy -auto-approve "${ARGS[@]}"
 
       - name: Save Terraform plugin cache
         if: always()
