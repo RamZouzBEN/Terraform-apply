@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       var_file:
-        description: "Chemin du .tfvars (optionnel)"
+        description: "Chemin du .tfvars (optionnel, ex: prod.tfvars)"
         required: false
         default: ""
       apply:
@@ -25,7 +25,7 @@ on:
         default: "false"
 
 permissions:
-  id-token: write   # OIDC pour AWS
+  id-token: write
   contents: read
   pull-requests: write
 
@@ -44,6 +44,7 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: .   # <<< racine du repo
 
     steps:
       - name: Checkout
@@ -60,14 +61,14 @@ jobs:
         with:
           terraform_version: "1.8.5"
 
-      # Cache des plugins/providers Terraform
+      # Cache providers/plugins Terraform à la racine
       - name: Restore Terraform plugin cache
         uses: actions/cache/restore@v4
         with:
           path: |
             ~/.terraform.d/plugin-cache
             ./.terraform
-          key: tf-${{ runner.os }}-${{ hashFiles('**/*.tf', '**/.terraform.lock.hcl') }}
+          key: tf-${{ runner.os }}-${{ hashFiles('**/*.tf', '.terraform.lock.hcl') }}
           restore-keys: |
             tf-${{ runner.os }}-
 
@@ -116,9 +117,8 @@ jobs:
           path: |
             ~/.terraform.d/plugin-cache
             ./.terraform
-          key: tf-${{ runner.os }}-${{ hashFiles('**/*.tf', '**/.terraform.lock.hcl') }}
+          key: tf-${{ runner.os }}-${{ hashFiles('**/*.tf', '.terraform.lock.hcl') }}
 
-      # Apply uniquement sur main ou workflow_dispatch avec apply=true
       - name: Terraform apply
         if: >
           (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/main'))
