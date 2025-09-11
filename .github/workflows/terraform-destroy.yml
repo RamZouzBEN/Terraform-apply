@@ -15,10 +15,6 @@ on:
         description: "Tape EXACTEMENT: DESTROY-MY-INFRA"
         required: true
         default: ""
-      environment:
-        description: "Environnement GitHub (protégé) pour approbation"
-        required: true
-        default: "prod"
 
 permissions:
   id-token: write
