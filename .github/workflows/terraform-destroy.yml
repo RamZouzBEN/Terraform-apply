@@ -42,15 +42,18 @@ jobs:
 # Option: paramètre pour choisir la branche à détruire (par défaut main)
 # on.workflow_dispatch.inputs.branch -> default: "main"
 
-      - name: Download tfstate from last successful apply run
+      - name: Download tfstate from last successful run (search by name)
         uses: dawidd6/action-download-artifact@v6
         with:
           repo: ${{ github.repository }}
-          workflow: terraform-aws.yml        # ← nom du fichier du workflow d'apply
+          # on filtre sur les runs "success" (si tu veux tout, enlève cette ligne)
           workflow_conclusion: success
-          branch: ${{ inputs.branch || 'main' }}
-          name: tfstate-${{ inputs.branch || 'main' }}  # doit matcher le nom côté upload
+          branch: main                    # adapte si besoin (ou rends-le input)
+          search_artifacts: true          # <- active la recherche par nom
+          name: tfstate-main              # <- DOIT matcher l’artifact uploadé par l’apply
           path: infra/
+          if_no_artifact_found: fail
+
 
       - name: Verify tfstate presence
         run: |
@@ -128,12 +131,11 @@ jobs:
           terraform destroy -auto-approve "${ARGS[@]}"
 
       # 2️⃣ Ré-upload du tfstate (vide ou mis à jour après destruction)
-      - name: Upload updated tfstate
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: tfstate
+          name: tfstate-main
           path: |
-            infra/terraform.tfstate
-            infra/terraform.tfstate.backup
-          if-no-files-found: ignore
+             infra/terraform.tfstate
+             infra/terraform.tfstate.backup
+          retention-days: 30
+
