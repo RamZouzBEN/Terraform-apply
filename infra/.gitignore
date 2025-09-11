@@ -1,0 +1,18 @@
+# Terraform local state & cache
+.terraform/
+.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Plans
+*.plan
+tfplan
+
+# IDE
+.vscode/
+.idea/
