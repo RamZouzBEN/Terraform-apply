@@ -3,10 +3,6 @@ variable "env" {
   default = "git-tst"
 }
 
-provider "aws" {
-  region = "eu-west-1"
-}
-
 # 1) Seul le bucket (sans versioning/SSE/PAB ici)
 resource "aws_s3_bucket" "tf_state" {
   bucket = "terraformstatetst" # mets EXACTEMENT le nom que tu utilises
