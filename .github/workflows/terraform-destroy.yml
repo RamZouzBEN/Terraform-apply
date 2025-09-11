@@ -1,0 +1,128 @@
+name: terraform-destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      var_file:
+        description: "Chemin du .tfvars (relatif à infra/, ex: prod.tfvars). Laisser vide si aucun."
+        required: false
+        default: ""
+      target:
+        description: "Cible optionnelle (-target=...). Laisser vide pour détruire tout."
+        required: false
+        default: ""
+      confirm:
+        description: "Tape EXACTEMENT: DESTROY-MY-INFRA pour confirmer la destruction"
+        required: true
+        default: ""
+      environment:
+        description: "Nom d'environnement GitHub (peut être protégé pour approbation)"
+        required: true
+        default: "prod"
+
+permissions:
+  id-token: write    # OIDC
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+concurrency:
+  group: tf-destroy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}   # protège via Environments si tu veux une approbation
+    defaults:
+      run:
+        shell: bash
+        working-directory: infra
+
+    steps:
+      - name: Safety check
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "DESTROY-MY-INFRA" ]; then
+            echo "Refusé: tu dois confirmer en saisissant exactement 'DESTROY-MY-INFRA'."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.5"
+
+      # Cache des providers Terraform (accélère init)
+      - name: Restore Terraform plugin cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.terraform.d/plugin-cache
+            infra/.terraform
+          key: tf-${{ runner.os }}-${{ hashFiles('infra/**/*.tf', 'infra/.terraform.lock.hcl') }}
+          restore-keys: |
+            tf-${{ runner.os }}-
+
+      - name: Terraform init
+        env:
+          TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
+        run: terraform init -input=false
+
+      # (Optionnel) Voir ce qui va être détruit avant d'exécuter le destroy
+      - name: Terraform plan -destroy (dry-run)
+        env:
+          TF_CLI_ARGS_plan: "-no-color"
+        run: |
+          set -euo pipefail
+          VARS=""
+          if [ -n "${{ github.event.inputs.var_file }}" ]; then
+            VARS="$VARS -var-file=${{ github.event.inputs.var_file }}"
+          fi
+          if [ -n "${{ github.event.inputs.target }}" ]; then
+            VARS="$VARS -target=${{ github.event.inputs.target }}"
+          fi
+          # Plan de destruction (dry-run)
+          terraform plan -destroy -out=tfplan.destroy $VARS
+          terraform show -no-color tfplan.destroy > tfplan-destroy.txt
+
+      - name: Upload destroy plan (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-destroy
+          path: infra/tfplan-destroy.txt
+
+      # Destruction réelle (auto-approve)
+      - name: Terraform destroy (apply)
+        env:
+          TF_CLI_ARGS_destroy: "-no-color"
+        run: |
+          set -euo pipefail
+          VARS=""
+          if [ -n "${{ github.event.inputs.var_file }}" ]; then
+            VARS="$VARS -var-file=${{ github.event.inputs.var_file }}"
+          fi
+          if [ -n "${{ github.event.inputs.target }}" ]; then
+            VARS="$VARS -target=${{ github.event.inputs.target }}"
+          fi
+          terraform destroy -auto-approve $VARS
+
+      - name: Save Terraform plugin cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.terraform.d/plugin-cache
+            infra/.terraform
+          key: tf-${{ runner.os }}-${{ hashFiles('infra/**/*.tf', 'infra/.terraform.lock.hcl') }}
