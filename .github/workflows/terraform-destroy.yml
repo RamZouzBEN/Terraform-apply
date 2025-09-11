@@ -39,22 +39,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-# Option: paramètre pour choisir la branche à détruire (par défaut main)
-# on.workflow_dispatch.inputs.branch -> default: "main"
-
-      - name: Download tfstate from last successful run (search by name)
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          repo: ${{ github.repository }}
-          # on filtre sur les runs "success" (si tu veux tout, enlève cette ligne)
-          workflow_conclusion: success
-          branch: main                    # adapte si besoin (ou rends-le input)
-          search_artifacts: true          # <- active la recherche par nom
-          name: tfstate-main              # <- DOIT matcher l’artifact uploadé par l’apply
-          path: infra/
-          if_no_artifact_found: fail
-
-
       - name: Verify tfstate presence
         run: |
           echo "Content of infra/:"
