@@ -45,6 +45,11 @@ jobs:
         working-directory: infra   # <<< tout se passe dans infra/
 
     steps:
+      - name: Clear caches
+        uses: easimon/wipe-cache@main
+        with:
+          dry-run: 'true'
+          
       - name: Checkout
         uses: actions/checkout@v4
 
