@@ -6,13 +6,9 @@ provider "aws" {
 data "aws_ami" "custom_ami" {
   most_recent = true
   owners      = ["self"]
-  filter {
-    name   = "name"
-    values = ["Windows*"]
-  }
-  filter {
-    name   = "tag:BuildTime"
-    values = ["20250909*"]
+ tags = {
+    Name   = "Windows*"
+    BuildTime = "2025*"
   }
 }
 
@@ -113,6 +109,7 @@ resource "aws_instance" "virtual_machine_test" {
     instance_metadata_tags = "enabled"
   }
 }
+
 
 
 
