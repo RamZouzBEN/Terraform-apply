@@ -68,7 +68,7 @@ jobs:
         with:
           path: |
             ~/.terraform.d/plugin-cache
-            ${{ github.event.inputs.working_directory || 'infra' }}/.terraform
+            ${{ github.event.inputs.working_directory || 'Terraform-apply' }}/.terraform
           key: tf-${{ runner.os }}-${{ hashFiles('**/*.tf', '**/.terraform.lock.hcl') }}
           restore-keys: |
             tf-${{ runner.os }}-
@@ -76,7 +76,7 @@ jobs:
       - name: Set working directory
         id: paths
         run: |
-          WD="${{ github.event.inputs.working_directory || 'infra' }}"
+          WD="${{ github.event.inputs.working_directory || 'Terraform-apply' }}"
           echo "wd=$WD" >> "$GITHUB_OUTPUT"
 
       - name: Terraform fmt
