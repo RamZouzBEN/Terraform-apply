@@ -95,47 +95,18 @@ jobs:
           TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
         run: terraform init -input=false
 
-      - name: Terraform plan -destroy (dry-run)
+      - name: Terraform init
+        working-directory: infra
         env:
-          TF_CLI_ARGS_plan: "-no-color"
-        run: |
-          set -euo pipefail
-          ARGS=()
-          if [ -n "${{ github.event.inputs.var_file }}" ]; then
-            ARGS+=("-var-file=${{ github.event.inputs.var_file }}")
-          fi
-          if [ -n "${{ github.event.inputs.target }}" ]; then
-            ARGS+=("-target=${{ github.event.inputs.target }}")
-          fi
-          terraform plan -destroy -out=tfplan.destroy "${ARGS[@]}"
-          terraform show -no-color tfplan.destroy > tfplan-destroy.txt
+          TF_PLUGIN_CACHE_DIR: $HOME/.terraform.d/plugin-cache
+        run: terraform init -input=false
 
-      - name: Upload destroy plan (artifact)
-        uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-destroy
-          path: infra/tfplan-destroy.txt
+      - name: Terraform plan -destroy
+        working-directory: infra
+        run: terraform plan -destroy -out=tfplan.destroy
 
-      - name: Terraform destroy (apply)
-        env:
-          TF_CLI_ARGS_destroy: "-no-color"
-        run: |
-          set -euo pipefail
-          ARGS=()
-          if [ -n "${{ github.event.inputs.var_file }}" ]; then
-            ARGS+=("-var-file=${{ github.event.inputs.var_file }}")
-          fi
-          if [ -n "${{ github.event.inputs.target }}" ]; then
-            ARGS+=("-target=${{ github.event.inputs.target }}")
-          fi
-          terraform destroy -auto-approve "${ARGS[@]}"
+      - name: Terraform destroy
+        working-directory: infra
+        run: terraform apply -auto-approve tfplan.destroy
 
-      # 2️⃣ Ré-upload du tfstate (vide ou mis à jour après destruction)
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tfstate-main
-          path: |
-             infra/terraform.tfstate
-             infra/terraform.tfstate.backup
-          retention-days: 30
 
