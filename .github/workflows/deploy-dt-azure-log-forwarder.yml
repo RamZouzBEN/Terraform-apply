@@ -83,13 +83,13 @@ jobs:
       - name: Set env
         id: env
         run: |
-          echo "DEPLOYMENT_NAME=${{ github.event.inputs.deployment_name }}" >> $GITHUB_ENV
-          echo "RESOURCE_GROUP=${{ github.event.inputs.resource_group }}" >> $GITHUB_ENV
-          echo "TARGET_URL=${{ secrets.DT_TARGET_URL }}" >> $GITHUB_ENV
-          echo "TARGET_API_TOKEN=${{ secrets.DT_API_TOKEN }}" >> $GITHUB_ENV
-          echo "EVENT_HUB_CONNECTION_STRING=${{ secrets.EVENT_HUB_CONNECTION_STRING }}" >> $GITHUB_ENV
-          echo "USE_EXISTING_ACTIVE_GATE=${{ github.event.inputs.use_activegate }}" >> $GITHUB_ENV
-          echo "REQUIRE_VALID_CERTIFICATE=${{ github.event.inputs.require_valid_certificate }}" >> $GITHUB_ENV
+          "DEPLOYMENT_NAME=${{ secrets.deployment_name }}" >> $GITHUB_ENV
+          "RESOURCE_GROUP=${{ secrets.resource_group }}" >> $GITHUB_ENV
+          "TARGET_URL=${{ secrets.DT_TARGET_URL }}" >> $GITHUB_ENV
+          "TARGET_API_TOKEN=${{ secrets.DT_API_TOKEN }}" >> $GITHUB_ENV
+          "EVENT_HUB_CONNECTION_STRING=${{ secrets.EVENT_HUB_CONNECTION_STRING }}" >> $GITHUB_ENV
+          "USE_EXISTING_ACTIVE_GATE=${{ secrets.use_activegate }}" >> $GITHUB_ENV
+          "REQUIRE_VALID_CERTIFICATE=${{ secrets.require_valid_certificate }}" >> $GITHUB_ENV
 
           # Optionnels
           if [ -n "${{ github.event.inputs.filter_config }}" ]; then
@@ -100,12 +100,12 @@ jobs:
           fi
 
           # VNet/PE
-          echo "VNET_RG=${{ github.event.inputs.vnet_rg }}" >> $GITHUB_ENV
-          echo "VNET_NAME=${{ github.event.inputs.vnet_name }}" >> $GITHUB_ENV
-          echo "VNET_SUBNET_NAME=${{ github.event.inputs.vnet_subnet_name }}" >> $GITHUB_ENV
-          echo "PE_RG=${{ github.event.inputs.pe_rg }}" >> $GITHUB_ENV
-          echo "PE_VNET_NAME=${{ github.event.inputs.pe_vnet_name }}" >> $GITHUB_ENV
-          echo "PE_SUBNET_NAME=${{ github.event.inputs.pe_subnet_name }}" >> $GITHUB_ENV
+          "VNET_RG=${{ secrets.vnet_rg }}" >> $GITHUB_ENV
+          "VNET_NAME=${{ secrets.vnet_name }}" >> $GITHUB_ENV
+          "VNET_SUBNET_NAME=${{ secrets.vnet_subnet_name }}" >> $GITHUB_ENV
+          "PE_RG=${{ secrets.resource_group }}" >> $GITHUB_ENV
+          "PE_VNET_NAME=${{ secrets.vnet_name }}" >> $GITHUB_ENV
+          "PE_SUBNET_NAME=${{ secrets.vnet_subnet_name }}" >> $GITHUB_ENV
           echo "CREATE_PE_DNS=${{ github.event.inputs.create_private_dns_zone_group }}" >> $GITHUB_ENV
           if [ -n "${{ github.event.inputs.private_dns_zone_rg }}" ]; then
             echo "PRIVATE_DNS_ZONE_RG=${{ github.event.inputs.private_dns_zone_rg }}" >> $GITHUB_ENV
