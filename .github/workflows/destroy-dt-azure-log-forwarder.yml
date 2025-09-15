@@ -18,7 +18,7 @@ on:
 jobs:
   destroy:
     runs-on: ubuntu-latest
-    # Si tes secrets sont rangés dans un Environment (ex: 'prod'), dé-commente la ligne suivante :
+    # Si tes secrets sont rangés dans un Environment (ex: 'prod'), dé-commente :
     # environment: prod
     permissions:
       id-token: write
@@ -28,12 +28,52 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Azure login
+      # ---------- Auth auto (SPN JSON ou OIDC) ----------
+      - name: Decide auth mode (SPN JSON vs OIDC)
+        id: auth
+        run: |
+          set -euo pipefail
+          # On lit le secret brut (peut être vide/null si non défini)
+          RAW='${{ secrets.AZURE_CREDENTIALS }}'
+          if [ -n "$RAW" ] && [ "$RAW" != "null" ]; then
+            # Vérifie la présence des champs camelCase attendus
+            echo "$RAW" | jq -e '.clientId,.clientSecret,.subscriptionId,.tenantId' >/dev/null 2>&1 && MODE="spn" || MODE=""
+          else
+            MODE=""
+          fi
+
+          if [ -z "$MODE" ]; then
+            # Fallback OIDC : on exige 3 secrets (ou variables) dédiés
+            CID='${{ secrets.AZURE_CLIENT_ID }}'
+            TID='${{ secrets.AZURE_TENANT_ID }}'
+            SID='${{ secrets.AZURE_SUBSCRIPTION_ID }}'
+            if [ -z "$CID" ] || [ "$CID" = "null" ] || [ -z "$TID" ] || [ "$TID" = "null" ] || [ -z "$SID" ] || [ "$SID" = "null" ]; then
+              echo "::error::Aucun mode d'auth complet détecté.
+- Soit définis AZURE_CREDENTIALS (JSON SPN avec clientId/clientSecret/subscriptionId/tenantId)
+- Soit définis AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID (OIDC + federated credential côté Azure AD)."
+              exit 1
+            fi
+            MODE="oidc"
+          fi
+
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "Auth mode detected: $MODE"
+
+      - name: Azure login (Service Principal JSON)
+        if: ${{ steps.auth.outputs.mode == 'spn' }}
         uses: azure/login@v2
         with:
-          # Utilise le SPN JSON (Option A). Si tu es en OIDC, remplace par client-id/tenant-id/subscription-id.
           credentials: ${{ secrets.AZURE_CREDENTIALS }}
-          enable-AzPSSession: true
+
+      - name: Azure login (OIDC)
+        if: ${{ steps.auth.outputs.mode == 'oidc' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # ---------------------------------------------------
 
       - name: Install CLI deps
         run: |
@@ -41,7 +81,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq
 
-      # --- Charger secrets/vars (fallback) ---
+      # Charger secrets/vars utiles (fallback secrets → vars)
       - name: Load Dynatrace & EH settings (secrets → vars)
         run: |
           set -euo pipefail
@@ -56,7 +96,6 @@ jobs:
           echo "DELETE_EMPTY_PLAN=${{ github.event.inputs.delete_empty_plan }}" >> $GITHUB_ENV
           echo "DELETE_APP_INSIGHTS=${{ github.event.inputs.delete_app_insights }}" >> $GITHUB_ENV
 
-      # --- Résoudre le RG / région via le namespace Event Hubs (comme au deploy) ---
       - name: Resolve Resource Group & Location from Event Hubs
         id: eh
         run: |
@@ -71,14 +110,13 @@ jobs:
           LOC=$(echo "$EH_JSON" | jq -r '.[0].location // empty')
 
           if [ -z "$RG" ] || [ -z "$LOC" ]; then
-            echo "::error::Namespace '$NS' introuvable dans la souscription pour ce SPN."; exit 1
+            echo "::error::Namespace '$NS' introuvable dans la souscription pour cet identifiant."; exit 1
           fi
 
           echo "RESOURCE_GROUP=$RG" >> $GITHUB_ENV
           echo "LOCATION=$LOC" >> $GITHUB_ENV
           echo "EH namespace=$NS | RG=$RG | region=$LOC"
 
-      # --- Retrouver la Function App (par préfixe) ---
       - name: Resolve Function App by prefix
         id: resolveapp
         run: |
@@ -99,7 +137,6 @@ jobs:
           echo "APP_ID=$APP_ID" >> $GITHUB_ENV
           echo "App résolue: $APP_NAME"
 
-      # --- DNS zone group -> detach (si existe) ---
       - name: Detach DNS zone group from Private Endpoint (if exists)
         if: ${{ steps.resolveapp.outputs.function_app }}
         continue-on-error: true
@@ -114,7 +151,6 @@ jobs:
             -n "$DNS_GRP" \
             --yes
 
-      # --- Private Endpoint -> delete (idempotent) ---
       - name: Delete Private Endpoint (if exists)
         if: ${{ steps.resolveapp.outputs.function_app }}
         continue-on-error: true
@@ -125,7 +161,6 @@ jobs:
           az network private-endpoint show -n "$PE_NAME" -g "$RESOURCE_GROUP" >/dev/null 2>&1 || exit 0
           az network private-endpoint delete -n "$PE_NAME" -g "$RESOURCE_GROUP" --yes
 
-      # --- VNet integration -> remove (idempotent) ---
       - name: Detach VNet integration
         if: ${{ steps.resolveapp.outputs.function_app }}
         continue-on-error: true
@@ -134,7 +169,6 @@ jobs:
           echo "Retrait de l'intégration VNet sur $FUNCTION_APP (si configurée)"
           az functionapp vnet-integration remove -g "$RESOURCE_GROUP" -n "$FUNCTION_APP"
 
-      # --- Function App -> delete ---
       - name: Delete Function App
         if: ${{ steps.resolveapp.outputs.function_app }}
         run: |
@@ -142,10 +176,40 @@ jobs:
           echo "Suppression Function App $FUNCTION_APP"
           az functionapp delete -g "$RESOURCE_GROUP" -n "$FUNCTION_APP"
 
-      # --- (Optionnel) Application Insights -> delete par préfixe ---
       - name: Delete Application Insights by prefix (optional)
         if: ${{ env.DELETE_APP_INSIGHTS == 'true' }}
         continue-on-error: true
         run: |
           set -euo pipefail
-          INSIGHTS
+          INSIGHTS_NAME=$(az monitor app-insights component list -g "$RESOURCE_GROUP" --query "[?starts_with(name, '${{ env.DEPLOYMENT_NAME }}')].name | [0]" -o tsv)
+          if [ -n "$INSIGHTS_NAME" ] && [ "$INSIGHTS_NAME" != "null" ]; then
+            echo "Suppression App Insights $INSIGHTS_NAME"
+            az monitor app-insights component delete -g "$RESOURCE_GROUP" -a "$INSIGHTS_NAME" --yes
+          else
+            echo "Aucun App Insights avec le préfixe '${{ env.DEPLOYMENT_NAME }}' — OK."
+          fi
+
+      - name: Delete App Service Plan if empty (optional)
+        if: ${{ env.DELETE_EMPTY_PLAN == 'true' && steps.resolveapp.outputs.function_app }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [ -z "${PLAN_ID:-}" ] || [ "$PLAN_ID" = "null" ]; then
+            echo "PLAN_ID inconnu — ignore."
+            exit 0
+          fi
+          PLAN_NAME=$(az appservice plan show --ids "$PLAN_ID" --query "name" -o tsv)
+          PLAN_RG=$(az appservice plan show --ids "$PLAN_ID" --query "resourceGroup" -o tsv)
+          APPS_LEFT=$(az webapp list -g "$PLAN_RG" --query "[?serverFarmId=='$PLAN_ID'] | length(@)")
+          if [ "${APPS_LEFT:-1}" -eq 0 ]; then
+            echo "Plan vide détecté ($PLAN_NAME) — suppression."
+            az appservice plan delete --ids "$PLAN_ID" --yes
+          else
+            echo "Plan $PLAN_NAME non vide ($APPS_LEFT apps restantes) — conservé."
+          fi
+
+      - name: Summary
+        run: |
+          echo "✅ Destroy terminé."
+          echo "RG: $RESOURCE_GROUP | région: $LOCATION"
+          echo "Prefix: $DEPLOYMENT_NAME"
