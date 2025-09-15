@@ -24,6 +24,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Validate AZURE_CREDENTIALS secret
+        run: |
+          set -euo pipefail
+          echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -e '.clientId,.clientSecret,.subscriptionId,.tenantId' >/dev/null || {
+          echo "::error::Le secret AZURE_CREDENTIALS est manquant ou mal formé. Il doit contenir clientId, clientSecret, subscriptionId, tenantId (camelCase)."
+          exit 1
+          }
 
       - name: Azure login
         uses: azure/login@v2
