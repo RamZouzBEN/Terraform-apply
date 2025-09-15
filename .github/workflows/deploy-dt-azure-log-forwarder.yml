@@ -1,4 +1,4 @@
-name: Deploy Dynatrace Azure Log Forwarder
+name: Deploy Dynatrace Azure Log Forwarder (Auto-RG/VNet/PE)
 
 on:
   workflow_dispatch:
@@ -6,56 +6,13 @@ on:
       deployment_name:
         description: "Nom (3-20 caractères, minuscules/chiffres)"
         required: true
-      resource_group:
-        description: "Resource Group cible (ex: rg-dt-logs)"
-        required: true
-      use_activegate:
-        description: "true pour déployer en mode privé via ActiveGate"
-        required: true
-        default: "false"
       enable_self_monitoring:
         description: "Activer la télémétrie self-monitoring (Azure Metrics)"
         required: true
         default: "false"
       filter_config:
-        description: "OPTIONNEL - Chaîne de filtres (ex: FILTER.GLOBAL.MIN_LOG_LEVEL=Warning)"
+        description: "OPTIONNEL - Filtres (ex: FILTER.GLOBAL.MIN_LOG_LEVEL=Warning)"
         required: false
-      require_valid_certificate:
-        description: "Vérifier le certificat (ActiveGate). true/false"
-        required: true
-        default: "false"
-
-      # --- Intégration VNet & Private Endpoint ---
-      vnet_rg:
-        description: "RG du VNet à intégrer (sortant)"
-        required: true
-      vnet_name:
-        description: "Nom du VNet à intégrer (sortant)"
-        required: true
-      vnet_subnet_name:
-        description: "Sous-réseau DÉDIÉ pour l'intégration VNet (doit être vide)"
-        required: true
-
-      pe_rg:
-        description: "RG pour le Private Endpoint (entrant)"
-        required: true
-      pe_vnet_name:
-        description: "VNet contenant le Private Endpoint"
-        required: true
-      pe_subnet_name:
-        description: "Sous-réseau pour le Private Endpoint"
-        required: true
-      create_private_dns_zone_group:
-        description: "Créer l'association Private DNS zone (privatelink.azurewebsites.net)"
-        required: true
-        default: "true"
-      private_dns_zone_rg:
-        description: "RG de la zone privée (si création/association)"
-        required: false
-      private_dns_zone_name:
-        description: "Nom de la zone privée"
-        required: false
-        default: "privatelink.azurewebsites.net"
 
 jobs:
   deploy:
@@ -68,28 +25,37 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Utilisez un SPN avec secret (credentials) ou OIDC. Ici: JSON complet dans AZURE_CREDENTIALS.
       - name: Azure login
         uses: azure/login@v2
         with:
           credentials: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Install Azure CLI deps
+      - name: Install CLI deps
         run: |
           az version
           sudo apt-get update -y
           sudo apt-get install -y jq curl
 
-      - name: Set env
-        id: env
+      - name: Validate & set base env
         run: |
-          "DEPLOYMENT_NAME=${{ secrets.deployment_name }}" >> $GITHUB_ENV
-          "RESOURCE_GROUP=${{ secrets.resource_group }}" >> $GITHUB_ENV
-          "TARGET_URL=${{ secrets.DT_TARGET_URL }}" >> $GITHUB_ENV
-          "TARGET_API_TOKEN=${{ secrets.DT_API_TOKEN }}" >> $GITHUB_ENV
-          "EVENT_HUB_CONNECTION_STRING=${{ secrets.EVENT_HUB_CONNECTION_STRING }}" >> $GITHUB_ENV
-          "USE_EXISTING_ACTIVE_GATE=${{ secrets.use_activegate }}" >> $GITHUB_ENV
-          "REQUIRE_VALID_CERTIFICATE=${{ secrets.require_valid_certificate }}" >> $GITHUB_ENV
+          set -euo pipefail
+          if ! [[ "${{ github.event.inputs.deployment_name }}" =~ ^[a-z0-9]{3,20}$ ]]; then
+            echo "DEPLOYMENT_NAME doit être 3-20 chars, minuscules/chiffres."; exit 1
+          fi
+          echo "DEPLOYMENT_NAME=${{ github.event.inputs.deployment_name }}" >> $GITHUB_ENV
+          echo "TARGET_URL=${{ secrets.DT_TARGET_URL }}" >> $GITHUB_ENV
+          echo "TARGET_API_TOKEN=${{ secrets.DT_API_TOKEN }}" >> $GITHUB_ENV
+          echo "EVENT_HUB_CONNECTION_STRING=${{ secrets.EVENT_HUB_CONNECTION_STRING }}" >> $GITHUB_ENV
+
+          # Déduire mode ActiveGate automatiquement depuis l'URL cible
+          if echo "${{ secrets.DT_TARGET_URL }}" | grep -qE ':[0-9]+/e/'; then
+            echo "USE_EXISTING_ACTIVE_GATE=true" >> $GITHUB_ENV
+          else
+            echo "USE_EXISTING_ACTIVE_GATE=false" >> $GITHUB_ENV
+          fi
+
+          # Certificat valide par défaut (recommandé)
+          echo "REQUIRE_VALID_CERTIFICATE=true" >> $GITHUB_ENV
 
           # Optionnels
           if [ -n "${{ github.event.inputs.filter_config }}" ]; then
@@ -99,33 +65,36 @@ jobs:
             echo "SFM_ENABLED=true" >> $GITHUB_ENV
           fi
 
-          # VNet/PE
-          "VNET_RG=${{ secrets.vnet_rg }}" >> $GITHUB_ENV
-          "VNET_NAME=${{ secrets.vnet_name }}" >> $GITHUB_ENV
-          "VNET_SUBNET_NAME=${{ secrets.vnet_subnet_name }}" >> $GITHUB_ENV
-          "PE_RG=${{ secrets.resource_group }}" >> $GITHUB_ENV
-          "PE_VNET_NAME=${{ secrets.vnet_name }}" >> $GITHUB_ENV
-          "PE_SUBNET_NAME=${{ secrets.vnet_subnet_name }}" >> $GITHUB_ENV
-          echo "CREATE_PE_DNS=${{ github.event.inputs.create_private_dns_zone_group }}" >> $GITHUB_ENV
-          if [ -n "${{ github.event.inputs.private_dns_zone_rg }}" ]; then
-            echo "PRIVATE_DNS_ZONE_RG=${{ github.event.inputs.private_dns_zone_rg }}" >> $GITHUB_ENV
-          fi
-          if [ -n "${{ github.event.inputs.private_dns_zone_name }}" ]; then
-            echo "PRIVATE_DNS_ZONE_NAME=${{ github.event.inputs.private_dns_zone_name }}" >> $GITHUB_ENV
-          fi
-
-      - name: Validate inputs (length/charset)
+      - name: Resolve Event Hubs namespace RG & location from connection string
+        id: eh
         run: |
-          if ! [[ "$DEPLOYMENT_NAME" =~ ^[a-z0-9]{3,20}$ ]]; then
-            echo "DEPLOYMENT_NAME doit être 3-20 chars, minuscules/chiffres."; exit 1
+          set -euo pipefail
+          # Extrait le namespace à partir de Endpoint=sb://<NAMESPACE>.servicebus.windows.net/ ...
+          NS=$(echo "$EVENT_HUB_CONNECTION_STRING" | sed -n 's/.*Endpoint=sb:\/\/\([^\.]*\)\..*/\1/p' || true)
+          if [ -z "$NS" ]; then
+            echo "Impossible d'extraire le namespace Event Hubs depuis la chaîne." >&2; exit 1
+          fi
+          echo "EH Namespace: $NS"
+
+          EH_JSON=$(az resource list --resource-type "Microsoft.EventHub/namespaces" -n "$NS" -o json)
+          RG=$(echo "$EH_JSON" | jq -r '.[0].resourceGroup // empty')
+          LOC=$(echo "$EH_JSON" | jq -r '.[0].location // empty')
+          if [ -z "$RG" ] || [ -z "$LOC" ]; then
+            echo "Namespace $NS introuvable via Azure CLI. Vérifie la souscription de ton SPN." >&2; exit 1
           fi
 
-      - name: Download installer script (latest)
+          echo "RESOURCE_GROUP=$RG" >> $GITHUB_ENV
+          echo "LOCATION=$LOC" >> $GITHUB_ENV
+          echo "resource_group=$RG" >> $GITHUB_OUTPUT
+          echo "location=$LOC" >> $GITHUB_OUTPUT
+          echo "RG résolu: $RG | Région: $LOC"
+
+      - name: Download Dynatrace installer script (latest)
         run: |
           curl -fsSL https://github.com/dynatrace-oss/dynatrace-azure-log-forwarder/releases/latest/download/dynatrace-azure-logs.sh -o dynatrace-azure-logs.sh
           chmod +x dynatrace-azure-logs.sh
 
-      - name: Deploy (SaaS or ActiveGate)
+      - name: Deploy Dynatrace Azure Log Forwarder
         env:
           DEPLOYMENT_NAME: ${{ env.DEPLOYMENT_NAME }}
           TARGET_URL: ${{ env.TARGET_URL }}
@@ -138,7 +107,6 @@ jobs:
           SFM_ENABLED: ${{ env.SFM_ENABLED }}
         run: |
           set -euo pipefail
-          echo "Deploying Dynatrace Azure Log Forwarder..."
           args=(
             --deployment-name "$DEPLOYMENT_NAME"
             --target-url "$TARGET_URL"
@@ -159,12 +127,13 @@ jobs:
 
           ./dynatrace-azure-logs.sh "${args[@]}"
 
-      - name: Output function name
-        id: out
+      - name: Resolve Function App
+        id: fa
         run: |
+          set -euo pipefail
           APP_NAME=$(az functionapp list -g "$RESOURCE_GROUP" --query "[?contains(name, '$DEPLOYMENT_NAME')].name | [0]" -o tsv)
           if [ -z "$APP_NAME" ] || [ "$APP_NAME" = "null" ]; then
-            echo "Impossible de retrouver la Function App créée (prefix: $DEPLOYMENT_NAME)"; exit 1
+            echo "Impossible de retrouver la Function App (prefix: $DEPLOYMENT_NAME)"; exit 1
           fi
           echo "FUNCTION_APP=$APP_NAME" >> $GITHUB_ENV
           echo "function_app=$APP_NAME" >> $GITHUB_OUTPUT
@@ -172,77 +141,102 @@ jobs:
           az functionapp show -g "$RESOURCE_GROUP" -n "$APP_NAME" --query "defaultHostName" -o tsv || true
 
       # ---------------------------
-      # Intégration RÉGIONALE VNET
+      # Réseau : VNet + subnets auto (si absents)
       # ---------------------------
-      - name: Check plan/SKU and hosting compatibility
-        id: sku
+      - name: Ensure VNet & subnets exist (create if missing)
         run: |
           set -euo pipefail
-          PLAN_ID=$(az functionapp show -g "$RESOURCE_GROUP" -n "$FUNCTION_APP" --query "serverFarmId" -o tsv)
-          SKU_TIER=$(az appservice plan show --ids "$PLAN_ID" --query "sku.tier" -o tsv)
-          SKU_NAME=$(az appservice plan show --ids "$PLAN_ID" --query "sku.name" -o tsv)
-          echo "AppService plan SKU: $SKU_TIER/$SKU_NAME"
-          if [ "$SKU_TIER" = "Free" ] || [ "$SKU_TIER" = "Shared" ]; then
-            echo "::warning::Le SKU $SKU_TIER ne supporte pas Private Endpoint pour App Service."
-          fi
+          VNET_NAME="${DEPLOYMENT_NAME}-vnet"
+          INT_SUBNET="snet-appsvc-int"
+          PE_SUBNET="snet-pe"
 
-      - name: Integrate Function App with existing VNet (outbound)
+          # Crée le VNet s'il n'existe pas (plage privée "neutre")
+          az network vnet show -g "$RESOURCE_GROUP" -n "$VNET_NAME" >/dev/null 2>&1 || \
+            az network vnet create -g "$RESOURCE_GROUP" -n "$VNET_NAME" --location "$LOCATION" --address-prefixes 10.200.0.0/16
+
+          # Subnet d'intégration VNet (doit être vide et dédié App Service)
+          az network vnet subnet show -g "$RESOURCE_GROUP" --vnet-name "$VNET_NAME" -n "$INT_SUBNET" >/dev/null 2>&1 || \
+            az network vnet subnet create -g "$RESOURCE_GROUP" --vnet-name "$VNET_NAME" -n "$INT_SUBNET" --address-prefixes 10.200.1.0/24
+
+          # Subnet du Private Endpoint (+ disable network policies)
+          az network vnet subnet show -g "$RESOURCE_GROUP" --vnet-name "$VNET_NAME" -n "$PE_SUBNET" >/dev/null 2>&1 || \
+            az network vnet subnet create -g "$RESOURCE_GROUP" --vnet-name "$VNET_NAME" -n "$PE_SUBNET" --address-prefixes 10.200.2.0/24
+
+          az network vnet subnet update -g "$RESOURCE_GROUP" --vnet-name "$VNET_NAME" -n "$PE_SUBNET" \
+            --disable-private-endpoint-network-policies true >/dev/null
+
+          echo "VNET_NAME=$VNET_NAME" >> $GITHUB_ENV
+          echo "INT_SUBNET=$INT_SUBNET" >> $GITHUB_ENV
+          echo "PE_SUBNET=$PE_SUBNET" >> $GITHUB_ENV
+
+      - name: Integrate Function App with VNet (regional outbound)
         run: |
           set -euo pipefail
-          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .subscriptionId)
           az functionapp vnet-integration add \
             -g "$RESOURCE_GROUP" \
             -n "$FUNCTION_APP" \
-            --vnet "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${VNET_RG}/providers/Microsoft.Network/virtualNetworks/${VNET_NAME}" \
-            --subnet "${VNET_SUBNET_NAME}"
+            --vnet "/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/virtualNetworks/$VNET_NAME" \
+            --subnet "$INT_SUBNET" || true
+          # L'opération est idempotente; '|| true' pour tolérer l'existant.
 
       # ---------------------------
-      # Private Endpoint (entrant)
+      # Private Endpoint + Private DNS
       # ---------------------------
-      - name: Prepare Private Endpoint inputs (resolve groupId)
-        id: pelist
+      - name: Create Private Endpoint (idempotent)
+        id: pe
         run: |
           set -euo pipefail
           APP_ID=$(az functionapp show -g "$RESOURCE_GROUP" -n "$FUNCTION_APP" --query "id" -o tsv)
           GROUP_ID=$(az network private-link-resource list --id "$APP_ID" --query "[0].properties.groupId" -o tsv)
-          if [ -z "$GROUP_ID" ] || [ "$GROUP_ID" = "null" ]; then
-            GROUP_ID="sites"
-          fi
-          echo "GROUP_ID=$GROUP_ID" >> $GITHUB_ENV
-          echo "APP_ID=$APP_ID" >> $GITHUB_ENV
-          echo "app_id=$APP_ID" >> $GITHUB_OUTPUT
-
-      - name: Create Private Endpoint (inbound)
-        env:
-          APP_ID: ${{ steps.pelist.outputs.app_id }}
-        run: |
-          set -euo pipefail
-          az network private-endpoint create \
-            -g "$PE_RG" \
-            -n "${DEPLOYMENT_NAME}-func-pe" \
-            --vnet-name "$PE_VNET_NAME" \
-            --subnet "$PE_SUBNET_NAME" \
-            --private-connection-resource-id "$APP_ID" \
-            --group-id "$GROUP_ID" \
-            --connection-name "${DEPLOYMENT_NAME}-func-pe-conn"
-
-      - name: (Optional) Attach Private DNS zone group
-        if: ${{ env.CREATE_PE_DNS == 'true' }}
-        run: |
-          set -euo pipefail
-          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .subscriptionId)
-
-          if [ -n "${PRIVATE_DNS_ZONE_RG:-}" ]; then
-            az network private-dns zone create \
-              -g "$PRIVATE_DNS_ZONE_RG" \
-              -n "${PRIVATE_DNS_ZONE_NAME:-privatelink.azurewebsites.net}" \
-              --if-none-match
-          fi
+          [ -z "$GROUP_ID" ] && GROUP_ID="sites"
 
           PE_NAME="${DEPLOYMENT_NAME}-func-pe"
-          az network private-endpoint dns-zone-group create \
-            --endpoint-name "$PE_NAME" \
-            -g "$PE_RG" \
-            -n "${DEPLOYMENT_NAME}-pe-dnsgrp" \
-            --zone-name "${DEPLOYMENT_NAME}-pe-dnszone" \
-            --private-dns-zone "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${PRIVATE_DNS_ZONE_RG}/providers/Microsoft.Network/privateDnsZones/${PRIVATE_DNS_ZONE_NAME:-privatelink.azurewebsites.net}"
+          az network private-endpoint show -g "$RESOURCE_GROUP" -n "$PE_NAME" >/dev/null 2>&1 || \
+            az network private-endpoint create \
+              -g "$RESOURCE_GROUP" \
+              -n "$PE_NAME" \
+              --vnet-name "$VNET_NAME" \
+              --subnet "$PE_SUBNET" \
+              --private-connection-resource-id "$APP_ID" \
+              --group-id "$GROUP_ID" \
+              --connection-name "${DEPLOYMENT_NAME}-func-pe-conn"
+
+          echo "pe_name=$PE_NAME" >> $GITHUB_OUTPUT
+          echo "PE_NAME=$PE_NAME" >> $GITHUB_ENV
+
+      - name: Attach Private DNS zone group (privatelink.azurewebsites.net)
+        run: |
+          set -euo pipefail
+          ZONE_RG="$RESOURCE_GROUP"
+          ZONE_NAME="privatelink.azurewebsites.net"
+          # Crée la zone privée si absente
+          az network private-dns zone show -g "$ZONE_RG" -n "$ZONE_NAME" >/dev/null 2>&1 || \
+            az network private-dns zone create -g "$ZONE_RG" -n "$ZONE_NAME"
+
+          # Lier la zone au VNet
+          LINK_NAME="${DEPLOYMENT_NAME}-dnslink"
+          az network private-dns link vnet show -g "$ZONE_RG" -z "$ZONE_NAME" -n "$LINK_NAME" >/dev/null 2>&1 || \
+            az network private-dns link vnet create \
+              -g "$ZONE_RG" \
+              -n "$LINK_NAME" \
+              -z "$ZONE_NAME" \
+              -v "/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/virtualNetworks/$VNET_NAME" \
+              -e false
+
+          # Associer le PE à la zone
+          az network private-endpoint dns-zone-group show \
+            --endpoint-name "$PE_NAME" -g "$RESOURCE_GROUP" -n "${DEPLOYMENT_NAME}-pe-dnsgrp" >/dev/null 2>&1 || \
+            az network private-endpoint dns-zone-group create \
+              --endpoint-name "$PE_NAME" \
+              -g "$RESOURCE_GROUP" \
+              -n "${DEPLOYMENT_NAME}-pe-dnsgrp" \
+              --zone-name "${DEPLOYMENT_NAME}-pe-dnszone" \
+              --private-dns-zone "/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$ZONE_RG/providers/Microsoft.Network/privateDnsZones/$ZONE_NAME"
+
+      - name: Summary
+        run: |
+          echo "✅ Déploiement terminé."
+          echo "RG: $RESOURCE_GROUP | Région: $LOCATION"
+          echo "Function App: $FUNCTION_APP"
+          echo "VNet: $VNET_NAME | Subnets: $INT_SUBNET, $PE_SUBNET"
+          echo "Private Endpoint: $PE_NAME"
