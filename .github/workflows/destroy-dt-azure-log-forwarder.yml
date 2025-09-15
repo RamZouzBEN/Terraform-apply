@@ -4,21 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       deployment_name:
-        description: "Prefix du déploiement (ex: dtlfparis01)"
+        description: "Préfixe du déploiement (ex: dtlfparis01)"
         required: true
       delete_empty_plan:
         description: "Supprimer l'App Service Plan s'il est vide"
         required: true
         default: "true"
       delete_app_insights:
-        description: "Supprimer Application Insights (si présent, par prefix)"
+        description: "Supprimer Application Insights (si présent, par préfixe)"
         required: true
         default: "false"
 
 jobs:
   destroy:
     runs-on: ubuntu-latest
-    # environment: prod   # décommente si tes secrets sont dans un Environment nommé "prod"
+    # environment: prod   # décommente si tes secrets sont dans un Environment "prod"
     permissions:
       id-token: write
       contents: read
@@ -27,44 +27,80 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------- Détection du mode d'auth (SPN JSON ou OIDC) ----------
-      - name: Decide auth mode (SPN JSON vs OIDC)
+      # ---------- Diagnostics (présence des secrets/vars) ----------
+      - name: Diagnostics – presence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Has secrets.AZURE_CREDENTIALS: $([[ -n '${{ secrets.AZURE_CREDENTIALS }}' && '${{ secrets.AZURE_CREDENTIALS }}' != 'null' ]] && echo yes || echo no)"
+          echo "Has vars.AZURE_CREDENTIALS: $([[ -n '${{ vars.AZURE_CREDENTIALS }}' && '${{ vars.AZURE_CREDENTIALS }}' != 'null' ]] && echo yes || echo no)"
+          echo "Has OIDC trio: $(
+            [[ -n '${{ secrets.AZURE_CLIENT_ID }}' && '${{ secrets.AZURE_CLIENT_ID }}' != 'null' &&
+               -n '${{ secrets.AZURE_TENANT_ID }}' && '${{ secrets.AZURE_TENANT_ID }}' != 'null' &&
+               -n '${{ secrets.AZURE_SUBSCRIPTION_ID }}' && '${{ secrets.AZURE_SUBSCRIPTION_ID }}' != 'null' ]] && echo yes || echo no
+          )"
+
+      # ---------- Choix du mode d'auth (SPN JSON depuis secrets/vars, ou OIDC) ----------
+      - name: Decide auth mode (SPN JSON from secrets/vars, else OIDC)
         id: auth
         shell: bash
         run: |
           set -euo pipefail
+          # 1) Essayer secrets.AZURE_CREDENTIALS
+          RAW="${{ secrets.AZURE_CREDENTIALS }}"
+          SRC="secrets"
+          # Sinon, basculer sur vars.AZURE_CREDENTIALS
+          if [ -z "$RAW" ] || [ "$RAW" = "null" ]; then
+            RAW="${{ vars.AZURE_CREDENTIALS }}"
+            SRC="vars"
+          fi
 
-          RAW_JSON="${{ secrets.AZURE_CREDENTIALS }}"
           MODE=""
-
-          if [ -n "$RAW_JSON" ] && [ "$RAW_JSON" != "null" ]; then
-            if echo "$RAW_JSON" | jq -e '.clientId,.clientSecret,.subscriptionId,.tenantId' >/dev/null 2>&1; then
-              MODE="spn"
-            fi
+          if [ -n "$RAW" ] && [ "$RAW" != "null" ]; then
+            # Vérif simple (sans jq) : présence des clés camelCase
+            echo "$RAW" | grep -q '"clientId"' && \
+            echo "$RAW" | grep -q '"clientSecret"' && \
+            echo "$RAW" | grep -q '"subscriptionId"' && \
+            echo "$RAW" | grep -q '"tenantId"' && MODE="spn" || MODE=""
           fi
 
           if [ -z "$MODE" ]; then
-            CID="${{ secrets.AZURE_CLIENT_ID }}"
-            TID="${{ secrets.AZURE_TENANT_ID }}"
-            SID="${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+            # Fallback OIDC si trio présent
+            CID='${{ secrets.AZURE_CLIENT_ID }}'
+            TID='${{ secrets.AZURE_TENANT_ID }}'
+            SID='${{ secrets.AZURE_SUBSCRIPTION_ID }}'
             if [ -n "$CID" ] && [ "$CID" != "null" ] && [ -n "$TID" ] && [ "$TID" != "null" ] && [ -n "$SID" ] && [ "$SID" != "null" ]; then
               MODE="oidc"
             fi
           fi
 
-          if [ -z "$MODE" ]; then
-            echo "::error::Aucun mode d’authentification complet trouvé. Définis soit AZURE_CREDENTIALS (JSON SPN camelCase), soit AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID pour OIDC."
+          if [ "$MODE" = "spn" ]; then
+            # Exporter le JSON pour le step azure/login
+            {
+              echo "AZ_CRED_JSON<<EOF"
+              echo "$RAW"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+            echo "mode=spn" >> "$GITHUB_OUTPUT"
+            echo "source=$SRC" >> "$GITHUB_OUTPUT"
+            echo "Auth mode: SPN JSON from $SRC (length=${#RAW})"
+          elif [ "$MODE" = "oidc" ]; then
+            echo "mode=oidc" >> "$GITHUB_OUTPUT"
+            echo "source=oidc" >> "$GITHUB_OUTPUT"
+            echo "Auth mode: OIDC"
+          else
+            echo "::error::Aucun mode d'auth complet détecté.
+- Fournis AZURE_CREDENTIALS (JSON SPN camelCase) dans secrets OU vars
+  {\"clientId\":\"...\",\"clientSecret\":\"...\",\"subscriptionId\":\"...\",\"tenantId\":\"...\"}
+- OU configure OIDC avec secrets AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID."
             exit 1
           fi
-
-          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
-          echo "Auth mode detected: $MODE"
 
       - name: Azure login (Service Principal JSON)
         if: ${{ steps.auth.outputs.mode == 'spn' }}
         uses: azure/login@v2
         with:
-          credentials: ${{ secrets.AZURE_CREDENTIALS }}
+          credentials: ${{ env.AZ_CRED_JSON }}
 
       - name: Azure login (OIDC)
         if: ${{ steps.auth.outputs.mode == 'oidc' }}
@@ -82,8 +118,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq
 
-      # Charger secrets/vars utiles (fallback secrets → vars)
-      - name: Load Dynatrace & EH settings (secrets → vars)
+      - name: Load settings (Dynatrace & Event Hubs)
         shell: bash
         run: |
           set -euo pipefail
@@ -91,12 +126,7 @@ jobs:
           [ -n "$DEPLOYMENT_NAME" ] || { echo "::error::deployment_name manquant"; exit 1; }
           echo "DEPLOYMENT_NAME=$DEPLOYMENT_NAME" >> "$GITHUB_ENV"
 
-          TARGET_URL="${{ secrets.DT_TARGET_URL }}"
-          if [ -z "$TARGET_URL" ] || [ "$TARGET_URL" = "null" ]; then
-            TARGET_URL="${{ vars.DT_TARGET_URL }}"
-          fi
-          echo "TARGET_URL=$TARGET_URL" >> "$GITHUB_ENV"
-
+          # Event Hubs CS (secrets -> vars)
           EH_CS="${{ secrets.EVENT_HUB_CONNECTION_STRING }}"
           if [ -z "$EH_CS" ] || [ "$EH_CS" = "null" ]; then
             EH_CS="${{ vars.EVENT_HUB_CONNECTION_STRING }}"
@@ -104,10 +134,10 @@ jobs:
           [ -n "$EH_CS" ] || { echo "::error::EVENT_HUB_CONNECTION_STRING manquant (Secret ou Variable)"; exit 1; }
           echo "EVENT_HUB_CONNECTION_STRING=$EH_CS" >> "$GITHUB_ENV"
 
+          # Options
           echo "DELETE_EMPTY_PLAN=${{ github.event.inputs.delete_empty_plan }}" >> "$GITHUB_ENV"
           echo "DELETE_APP_INSIGHTS=${{ github.event.inputs.delete_app_insights }}" >> "$GITHUB_ENV"
 
-      # Résoudre le RG / la région via le namespace Event Hubs
       - name: Resolve Resource Group & Location from Event Hubs
         id: eh
         shell: bash
@@ -115,7 +145,7 @@ jobs:
           set -euo pipefail
           NS="$(echo "$EVENT_HUB_CONNECTION_STRING" | sed -n 's/.*Endpoint=sb:\/\/\([^\.]*\)\..*/\1/p' || true)"
           if [ -z "$NS" ]; then
-            echo "::error::Impossible d’extraire le namespace Event Hubs depuis la chaîne."; exit 1
+            echo "::error::Impossible d'extraire le namespace Event Hubs depuis la chaîne."; exit 1
           fi
 
           EH_JSON="$(az resource list --resource-type Microsoft.EventHub/namespaces -n "$NS" -o json)"
@@ -130,7 +160,6 @@ jobs:
           echo "LOCATION=$LOC" >> "$GITHUB_ENV"
           echo "EH namespace=$NS | RG=$RG | region=$LOC"
 
-      # Retrouver la Function App par prefix
       - name: Resolve Function App by prefix
         id: resolveapp
         shell: bash
@@ -152,7 +181,6 @@ jobs:
           echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
           echo "App résolue: $APP_NAME"
 
-      # DNS zone group -> detach
       - name: Detach DNS zone group from Private Endpoint (if exists)
         if: ${{ steps.resolveapp.outputs.function_app }}
         continue-on-error: true
@@ -168,7 +196,6 @@ jobs:
             -n "$DNS_GRP" \
             --yes
 
-      # Private Endpoint -> delete
       - name: Delete Private Endpoint (if exists)
         if: ${{ steps.resolveapp.outputs.function_app }}
         continue-on-error: true
@@ -181,17 +208,15 @@ jobs:
             az network private-endpoint delete -n "$PE_NAME" -g "$RESOURCE_GROUP" --yes
           fi
 
-      # VNet integration -> remove
       - name: Detach VNet integration
         if: ${{ steps.resolveapp.outputs.function_app }}
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          echo "Retrait de l’intégration VNet sur $FUNCTION_APP (si configurée)"
+          echo "Retrait de l'intégration VNet sur $FUNCTION_APP (si configurée)"
           az functionapp vnet-integration remove -g "$RESOURCE_GROUP" -n "$FUNCTION_APP"
 
-      # Function App -> delete
       - name: Delete Function App
         if: ${{ steps.resolveapp.outputs.function_app }}
         shell: bash
@@ -200,7 +225,6 @@ jobs:
           echo "Suppression Function App $FUNCTION_APP"
           az functionapp delete -g "$RESOURCE_GROUP" -n "$FUNCTION_APP"
 
-      # Application Insights -> delete (optionnel)
       - name: Delete Application Insights by prefix (optional)
         if: ${{ env.DELETE_APP_INSIGHTS == 'true' }}
         continue-on-error: true
@@ -212,10 +236,9 @@ jobs:
             echo "Suppression App Insights $INSIGHTS_NAME"
             az monitor app-insights component delete -g "$RESOURCE_GROUP" -a "$INSIGHTS_NAME" --yes
           else
-            echo "Aucun App Insights avec le prefix '$DEPLOYMENT_NAME' — OK."
+            echo "Aucun App Insights avec le préfixe '$DEPLOYMENT_NAME' — OK."
           fi
 
-      # App Service Plan -> delete si vide (optionnel)
       - name: Delete App Service Plan if empty (optional)
         if: ${{ env.DELETE_EMPTY_PLAN == 'true' && steps.resolveapp.outputs.function_app }}
         continue-on-error: true
