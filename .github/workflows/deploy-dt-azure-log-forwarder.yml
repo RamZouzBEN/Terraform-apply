@@ -63,7 +63,7 @@ jobs:
             RAW="${{ vars.AZURE_CREDENTIALS }}"
             SRC="vars"
           fi
-          MODE=""
+          MODE="spn"
           if [ -n "$RAW" ] && [ "$RAW" != "null" ]; then
             echo "$RAW" | grep -q '"clientId"' && \
             echo "$RAW" | grep -q '"clientSecret"' && \
