@@ -124,11 +124,14 @@ jobs:
           PE_NAME="${DEPLOYMENT_NAME}-func-pe"
           DNS_GRP="${DEPLOYMENT_NAME}-pe-dnsgrp"
           echo "Suppression DNS zone group $DNS_GRP du PE $PE_NAME (si present)"
-          az network private-endpoint dns-zone-group delete \
-            --endpoint-name "$PE_NAME" \
-            -g "$RESOURCE_GROUP" \
-            -n "$DNS_GRP" \
-            --yes
+          if az network private-endpoint dns-zone-group show --endpoint-name "$PE_NAME" -g "$RESOURCE_GROUP" -n "$DNS_GRP" >/dev/null 2>&1; then
+            az network private-endpoint dns-zone-group delete \
+              --endpoint-name "$PE_NAME" \
+              -g "$RESOURCE_GROUP" \
+              -n "$DNS_GRP"
+          else
+            echo "DNS zone group $DNS_GRP non trouvé — OK."
+          fi
 
       # ---------- Private Endpoint -> delete ----------
       - name: Delete Private Endpoint (if exists)
