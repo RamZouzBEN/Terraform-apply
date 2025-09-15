@@ -110,9 +110,9 @@ jobs:
           echo "CREATE_PE_DNS=${{ github.event.inputs.create_private_dns_zone_group }}" >> $GITHUB_ENV
 
           # Defaults si creation necessaire
-          echo "VNET_ADDRESS_PREFIX=10.200.0.0/16" >> $GITHUB_ENV
-          echo "INT_SUBNET_PREFIX=10.200.1.0/24" >> $GITHUB_ENV
-          echo "PE_SUBNET_PREFIX=10.200.2.0/24" >> $GITHUB_ENV
+          echo "VNET_ADDRESS_PREFIX=10.0.0.0/16" >> $GITHUB_ENV
+          echo "INT_SUBNET_PREFIX=10.0.3.0/24" >> $GITHUB_ENV
+          echo "PE_SUBNET_PREFIX=10.0.4.0/24" >> $GITHUB_ENV
           echo "PRIVATE_DNS_ZONE_NAME=privatelink.azurewebsites.net" >> $GITHUB_ENV
 
       # ---- Deduction RG/region via Event Hubs ----
