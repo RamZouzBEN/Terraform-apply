@@ -63,7 +63,8 @@ on:
         description: "Nom de la zone DNS privee"
         required: false
         default: "privatelink.azurewebsites.net"
-
+  push:
+      branches: [ "main" ]
 jobs:
   deploy:
     runs-on: ubuntu-latest
