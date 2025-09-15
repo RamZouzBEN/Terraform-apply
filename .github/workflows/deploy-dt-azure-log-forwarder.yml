@@ -51,61 +51,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # --- Auth auto: SPN JSON via secrets/vars -> creds:, sinon OIDC ---
-      - name: Decide auth mode (SPN JSON from secrets/vars, else OIDC)
-        id: auth
-        shell: bash
-        run: |
-          set -euo pipefail
-          RAW="${{ secrets.AZURE_CREDENTIALS }}"
-          SRC="secrets"
-          if [ -z "$RAW" ] || [ "$RAW" = "null" ]; then
-            RAW="${{ vars.AZURE_CREDENTIALS }}"
-            SRC="vars"
-          fi
-          MODE="spn"
-          if [ -n "$RAW" ] && [ "$RAW" != "null" ]; then
-            echo "$RAW" | grep -q '"clientId"' && \
-            echo "$RAW" | grep -q '"clientSecret"' && \
-            echo "$RAW" | grep -q '"subscriptionId"' && \
-            echo "$RAW" | grep -q '"tenantId"' && MODE="spn" || MODE=""
-          fi
-          if [ -z "$MODE" ]; then
-            CID='${{ secrets.AZURE_CLIENT_ID }}'
-            TID='${{ secrets.AZURE_TENANT_ID }}'
-            SID='${{ secrets.AZURE_SUBSCRIPTION_ID }}'
-            if [ -n "$CID" ] && [ "$CID" != "null" ] && [ -n "$TID" ] && [ "$TID" != "null" ] && [ -n "$SID" ] && [ "$SID" != "null" ]; then
-              MODE="oidc"
-            fi
-          fi
-          if [ "$MODE" = "spn" ]; then
-            {
-              echo "AZ_CRED_JSON<<EOF"
-              echo "$RAW"
-              echo "EOF"
-            } >> "$GITHUB_ENV"
-            echo "mode=spn" >> "$GITHUB_OUTPUT"
-            echo "source=$SRC" >> "$GITHUB_OUTPUT"
-          elif [ "$MODE" = "oidc" ]; then
-            echo "mode=oidc" >> "$GITHUB_OUTPUT"
-          else
-            printf '%s\n' "::error::Aucun mode d'auth detecte. Fournis AZURE_CREDENTIALS (JSON camelCase) ou OIDC (AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID)."
-            exit 1
-          fi
-
-      - name: Azure login (Service Principal JSON)
-        if: ${{ steps.auth.outputs.mode == 'spn' }}
+      # Utilisez un SPN avec secret (credentials) ou OIDC. Ici: JSON complet dans AZURE_CREDENTIALS.
+      - name: Azure login
         uses: azure/login@v2
         with:
-          creds: ${{ env.AZ_CRED_JSON }}
+          credentials: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Azure login (OIDC)
-        if: ${{ steps.auth.outputs.mode == 'oidc' }}
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Install CLI deps
         run: |
