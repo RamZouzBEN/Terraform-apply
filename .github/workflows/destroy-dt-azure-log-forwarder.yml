@@ -1,4 +1,4 @@
-name: Destroy Dynatrace Azure Log Forwarder
+name: Destroy Dynatrace Azure Log Forwarder (OIDC)
 
 on:
   workflow_dispatch:
@@ -18,7 +18,6 @@ on:
 jobs:
   destroy:
     runs-on: ubuntu-latest
-    # environment: prod   # decommenter si vos secrets sont attaches a un Environment "prod"
     permissions:
       id-token: write
       contents: read
@@ -27,13 +26,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Azure login (Service Principal JSON)
-        if: ${{ steps.auth.outputs.mode == 'spn' }}
+      # ---------- Assert OIDC secrets presence ----------
+      - name: Assert OIDC secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${{ secrets.AZURE_CLIENT_ID }}" ] || { echo "::error::AZURE_CLIENT_ID manquant"; exit 1; }
+          [ -n "${{ secrets.AZURE_TENANT_ID }}" ] || { echo "::error::AZURE_TENANT_ID manquant"; exit 1; }
+          [ -n "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ] || { echo "::error::AZURE_SUBSCRIPTION_ID manquant"; exit 1; }
+
+      # ---------- Login Azure (OIDC par defaut) ----------
+      - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify Azure session
+        shell: bash
+        run: |
+          set -euo pipefail
+          az account show -o table
 
       - name: Install CLI deps
         run: |
@@ -41,7 +55,8 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq
 
-      - name: Load settings (Dynatrace & Event Hubs)
+      # ---------- Charger settings ----------
+      - name: Load settings (Event Hubs CS and flags)
         shell: bash
         run: |
           set -euo pipefail
@@ -49,7 +64,6 @@ jobs:
           [ -n "$DEPLOYMENT_NAME" ] || { echo "::error::deployment_name manquant"; exit 1; }
           echo "DEPLOYMENT_NAME=$DEPLOYMENT_NAME" >> "$GITHUB_ENV"
 
-          # Event Hubs CS (secrets -> vars)
           EH_CS="${{ secrets.EVENT_HUB_CONNECTION_STRING }}"
           if [ -z "$EH_CS" ] || [ "$EH_CS" = "null" ]; then
             EH_CS="${{ vars.EVENT_HUB_CONNECTION_STRING }}"
@@ -57,32 +71,28 @@ jobs:
           [ -n "$EH_CS" ] || { echo "::error::EVENT_HUB_CONNECTION_STRING manquant (Secret ou Variable)"; exit 1; }
           echo "EVENT_HUB_CONNECTION_STRING=$EH_CS" >> "$GITHUB_ENV"
 
-          # Options
           echo "DELETE_EMPTY_PLAN=${{ github.event.inputs.delete_empty_plan }}" >> "$GITHUB_ENV"
           echo "DELETE_APP_INSIGHTS=${{ github.event.inputs.delete_app_insights }}" >> "$GITHUB_ENV"
 
+      # ---------- Resoudre RG/region via Event Hubs ----------
       - name: Resolve Resource Group & Location from Event Hubs
         id: eh
         shell: bash
         run: |
           set -euo pipefail
           NS="$(echo "$EVENT_HUB_CONNECTION_STRING" | sed -n 's/.*Endpoint=sb:\/\/\([^\.]*\)\..*/\1/p' || true)"
-          if [ -z "$NS" ]; then
-            echo "::error::Impossible d extraire le namespace Event Hubs depuis la chaine."; exit 1
-          fi
+          [ -n "$NS" ] || { echo "::error::Impossible d extraire le namespace Event Hubs depuis la chaine."; exit 1; }
 
           EH_JSON="$(az resource list --resource-type Microsoft.EventHub/namespaces -n "$NS" -o json)"
           RG="$(echo "$EH_JSON" | jq -r '.[0].resourceGroup // empty')"
           LOC="$(echo "$EH_JSON" | jq -r '.[0].location // empty')"
-
-          if [ -z "$RG" ] || [ -z "$LOC" ]; then
-            echo "::error::Namespace introuvable dans la souscription."; exit 1
-          fi
+          [ -n "$RG" ] && [ -n "$LOC" ] || { echo "::error::Namespace $NS introuvable dans la souscription."; exit 1; }
 
           echo "RESOURCE_GROUP=$RG" >> "$GITHUB_ENV"
           echo "LOCATION=$LOC" >> "$GITHUB_ENV"
           echo "EH namespace=$NS | RG=$RG | region=$LOC"
 
+      # ---------- Trouver la Function App ----------
       - name: Resolve Function App by prefix
         id: resolveapp
         shell: bash
@@ -90,7 +100,7 @@ jobs:
           set -euo pipefail
           APP_NAME="$(az functionapp list -g "$RESOURCE_GROUP" --query "[?starts_with(name, '$DEPLOYMENT_NAME')].name | [0]" -o tsv)"
           if [ -z "$APP_NAME" ] || [ "$APP_NAME" = "null" ]; then
-            echo "::warning::Aucune Function App ne commence par $DEPLOYMENT_NAME dans RG $RESOURCE_GROUP."
+            echo "::warning::Aucune Function App ne commence par '$DEPLOYMENT_NAME' dans RG '$RESOURCE_GROUP'."
             echo "function_app=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -104,6 +114,7 @@ jobs:
           echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
           echo "App resolue: $APP_NAME"
 
+      # ---------- DNS zone group -> detach ----------
       - name: Detach DNS zone group from Private Endpoint (if exists)
         if: ${{ steps.resolveapp.outputs.function_app }}
         continue-on-error: true
@@ -119,6 +130,7 @@ jobs:
             -n "$DNS_GRP" \
             --yes
 
+      # ---------- Private Endpoint -> delete ----------
       - name: Delete Private Endpoint (if exists)
         if: ${{ steps.resolveapp.outputs.function_app }}
         continue-on-error: true
@@ -131,6 +143,7 @@ jobs:
             az network private-endpoint delete -n "$PE_NAME" -g "$RESOURCE_GROUP" --yes
           fi
 
+      # ---------- VNet integration -> remove ----------
       - name: Detach VNet integration
         if: ${{ steps.resolveapp.outputs.function_app }}
         continue-on-error: true
@@ -140,6 +153,7 @@ jobs:
           echo "Retrait de l integration VNet sur $FUNCTION_APP (si configuree)"
           az functionapp vnet-integration remove -g "$RESOURCE_GROUP" -n "$FUNCTION_APP"
 
+      # ---------- Function App -> delete ----------
       - name: Delete Function App
         if: ${{ steps.resolveapp.outputs.function_app }}
         shell: bash
@@ -148,6 +162,7 @@ jobs:
           echo "Suppression Function App $FUNCTION_APP"
           az functionapp delete -g "$RESOURCE_GROUP" -n "$FUNCTION_APP"
 
+      # ---------- Application Insights -> delete (optionnel) ----------
       - name: Delete Application Insights by prefix (optional)
         if: ${{ env.DELETE_APP_INSIGHTS == 'true' }}
         continue-on-error: true
@@ -162,6 +177,7 @@ jobs:
             echo "Aucun App Insights avec le prefix $DEPLOYMENT_NAME — OK."
           fi
 
+      # ---------- App Service Plan -> delete si vide (optionnel) ----------
       - name: Delete App Service Plan if empty (optional)
         if: ${{ env.DELETE_EMPTY_PLAN == 'true' && steps.resolveapp.outputs.function_app }}
         continue-on-error: true
@@ -184,6 +200,6 @@ jobs:
 
       - name: Summary
         run: |
-          echo "✅ Destroy termine."
+          echo "OK: Destroy termine."
           echo "RG: $RESOURCE_GROUP | region: $LOCATION"
           echo "Prefix: $DEPLOYMENT_NAME"
