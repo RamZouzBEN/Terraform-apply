@@ -1,70 +1,47 @@
-name: Deploy Dynatrace Azure Log Forwarder (Existing or Create VNet)
+name: Deploy Dynatrace Azure Log Forwarder (≤10 inputs)
 
 on:
   workflow_dispatch:
     inputs:
       deployment_name:
-        description: "Nom (3-20 caracteres, minuscules/chiffres)"
+        description: "Nom (3-20, minuscules/chiffres)"
         required: true
       enable_self_monitoring:
-        description: "Activer la telemetrie self-monitoring"
+        description: "Activer la télémétrie self-monitoring"
         required: true
         default: "false"
       filter_config:
         description: "OPTIONNEL - Filtres (ex: FILTER.GLOBAL.MIN_LOG_LEVEL=Warning)"
         required: false
 
-      # --- reseau: utiliser un VNet existant ou en creer un ---
+      # ---- Réseau : EXISTING ou CREATE (≤10 inputs au total) ----
       network_mode:
-        description: "existing (utiliser VNet existant) ou create (creer VNet)"
+        description: "existing (utiliser VNet existant) ou create (créer VNet)"
         required: true
         default: "existing"
-      vnet_rg:
-        description: "RG du VNet. Par defaut, le RG deduit de l Event Hub"
-        required: false
       vnet_name:
-        description: "Nom du VNet a utiliser ou creer"
+        description: "Nom du VNet à utiliser/créer"
         required: true
+      vnet_rg:
+        description: "RG du VNet (vide = RG déduit Event Hub)"
+        required: false
       int_subnet_name:
-        description: "Nom du subnet d integration VNet (sortant)"
+        description: "Subnet d'intégration VNet (sortant). Si absent et CREATE, il sera créé."
         required: true
         default: "snet-appsvc-int"
       pe_subnet_name:
-        description: "Nom du subnet du Private Endpoint (entrant)"
+        description: "Subnet Private Endpoint (entrant). Si absent et CREATE, il sera créé."
         required: true
         default: "snet-pe"
-      # creation des ressources reseau si besoin
       create_missing_subnets:
-        description: "Creer les subnets s ils sont absents (en mode existing)"
+        description: "Créer les subnets manquants (en mode existing)"
         required: true
         default: "true"
-      vnet_address_prefix:
-        description: "Prefixe CIDR du VNet si creation (ex: 10.200.0.0/16)"
-        required: false
-        default: "10.200.0.0/16"
-      int_subnet_prefix:
-        description: "CIDR du subnet d integration (si creation)"
-        required: false
-        default: "10.200.1.0/24"
-      pe_subnet_prefix:
-        description: "CIDR du subnet du PE (si creation)"
-        required: false
-        default: "10.200.2.0/24"
-
-      # --- DNS Prive pour le PE ---
       create_private_dns_zone_group:
-        description: "Creer l association Private DNS zone (privatelink.azurewebsites.net)"
+        description: "Créer l'association Private DNS zone (privatelink.azurewebsites.net)"
         required: true
         default: "true"
-      private_dns_zone_rg:
-        description: "RG de la zone DNS privee (sinon, defaut: RG deduit)"
-        required: false
-      private_dns_zone_name:
-        description: "Nom de la zone DNS privee"
-        required: false
-        default: "privatelink.azurewebsites.net"
-  push:
-      branches: [ "main" ]
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -76,7 +53,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Auth simple via SPN JSON. Si tu utilises OIDC, remplace par client-id/tenant-id/subscription-id.
+      # Auth via SPN JSON. (Si tu veux OIDC, remplace avec client-id/tenant-id/subscription-id)
       - name: Azure login
         uses: azure/login@v2
         with:
@@ -88,19 +65,18 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl
 
-      # --- Charger secrets/vars avec fallback et valider ---
+      # ---- Charger secrets/vars + valider ----
       - name: Load and validate base env
         shell: bash
         run: |
           set -euo pipefail
 
           DEPLOYMENT_NAME='${{ github.event.inputs.deployment_name }}'
-          [[ "$DEPLOYMENT_NAME" =~ ^[a-z0-9]{3,20}$ ]] || { echo "::error::deployment_name doit etre 3-20, minuscules/chiffres"; exit 1; }
+          [[ "$DEPLOYMENT_NAME" =~ ^[a-z0-9]{3,20}$ ]] || { echo "::error::deployment_name doit être 3-20, minuscules/chiffres"; exit 1; }
           echo "DEPLOYMENT_NAME=$DEPLOYMENT_NAME" >> $GITHUB_ENV
 
-          # Secrets -> Vars fallback
           TARGET_URL="${{ secrets.DT_TARGET_URL }}"; [ -n "$TARGET_URL" ] || TARGET_URL='${{ vars.DT_TARGET_URL }}'
-          TARGET_API_TOKEN="${{ secrets.DT_API_TOKEN }}"; [ -n "$TARGET_API_TOKEN" ] || TARGET_API_TOKEN='${{ vars.DT_API_TOKEN }}'
+          TARGET_API_TOKEN='${{ secrets.DT_API_TOKEN }}'; [ -n "$TARGET_API_TOKEN" ] || TARGET_API_TOKEN='${{ vars.DT_API_TOKEN }}'
           EH_CS='${{ secrets.EVENT_HUB_CONNECTION_STRING }}'; [ -n "$EH_CS" ] || EH_CS='${{ vars.EVENT_HUB_CONNECTION_STRING }}'
 
           [ -n "$TARGET_URL" ] || { echo "::error::DT_TARGET_URL manquant"; exit 1; }
@@ -111,7 +87,7 @@ jobs:
           echo "TARGET_API_TOKEN=$TARGET_API_TOKEN" >> $GITHUB_ENV
           echo "EVENT_HUB_CONNECTION_STRING=$EH_CS" >> $GITHUB_ENV
 
-          # Auto ActiveGate si presence :port/e/
+          # ActiveGate auto si :port/e/
           if echo "$TARGET_URL" | grep -qE ':[0-9]+/e/'; then
             echo "USE_EXISTING_ACTIVE_GATE=true" >> $GITHUB_ENV
           else
@@ -127,31 +103,30 @@ jobs:
             echo "SFM_ENABLED=true" >> $GITHUB_ENV
           fi
 
-          # Reseau inputs
+          # Réseau (≤10 inputs)
           echo "NETWORK_MODE=${{ github.event.inputs.network_mode }}" >> $GITHUB_ENV
           echo "VNET_NAME=${{ github.event.inputs.vnet_name }}" >> $GITHUB_ENV
+          echo "VNET_RG_INPUT=${{ github.event.inputs.vnet_rg }}" >> $GITHUB_ENV
           echo "INT_SUBNET_NAME=${{ github.event.inputs.int_subnet_name }}" >> $GITHUB_ENV
           echo "PE_SUBNET_NAME=${{ github.event.inputs.pe_subnet_name }}" >> $GITHUB_ENV
           echo "CREATE_MISSING_SUBNETS=${{ github.event.inputs.create_missing_subnets }}" >> $GITHUB_ENV
-          echo "VNET_ADDRESS_PREFIX=${{ github.event.inputs.vnet_address_prefix }}" >> $GITHUB_ENV
-          echo "INT_SUBNET_PREFIX=${{ github.event.inputs.int_subnet_prefix }}" >> $GITHUB_ENV
-          echo "PE_SUBNET_PREFIX=${{ github.event.inputs.pe_subnet_prefix }}" >> $GITHUB_ENV
-
-          # DNS prive
           echo "CREATE_PE_DNS=${{ github.event.inputs.create_private_dns_zone_group }}" >> $GITHUB_ENV
-          if [ -n "${{ github.event.inputs.private_dns_zone_rg }}" ]; then
-            echo "PRIVATE_DNS_ZONE_RG=${{ github.event.inputs.private_dns_zone_rg }}" >> $GITHUB_ENV
-          fi
-          echo "PRIVATE_DNS_ZONE_NAME=${{ github.event.inputs.private_dns_zone_name }}" >> $GITHUB_ENV
 
-      # --- Deduit RG/region a partir du namespace Event Hubs ---
+          # Prefix par défaut si on doit créer (pas en inputs pour rester ≤10)
+          echo "VNET_ADDRESS_PREFIX=10.200.0.0/16" >> $GITHUB_ENV
+          echo "INT_SUBNET_PREFIX=10.200.1.0/24" >> $GITHUB_ENV
+          echo "PE_SUBNET_PREFIX=10.200.2.0/24" >> $GITHUB_ENV
+          # DNS privé : RG = RG déduit, zone = privatelink.azurewebsites.net
+          echo "PRIVATE_DNS_ZONE_NAME=privatelink.azurewebsites.net" >> $GITHUB_ENV
+
+      # ---- Déduire RG/region depuis Event Hubs ----
       - name: Resolve Resource Group & Location from Event Hubs
         id: eh
         shell: bash
         run: |
           set -euo pipefail
           NS="$(echo "$EVENT_HUB_CONNECTION_STRING" | sed -n 's/.*Endpoint=sb:\/\/\([^\.]*\)\..*/\1/p' || true)"
-          [ -n "$NS" ] || { echo "::error::Impossible d extraire le namespace Event Hubs depuis la chaine."; exit 1; }
+          [ -n "$NS" ] || { echo "::error::Impossible d extraire le namespace Event Hubs depuis la chaîne."; exit 1; }
 
           EH_JSON="$(az resource list --resource-type Microsoft.EventHub/namespaces -n "$NS" -o json)"
           RG="$(echo "$EH_JSON" | jq -r '.[0].resourceGroup // empty')"
@@ -160,7 +135,12 @@ jobs:
 
           echo "RESOURCE_GROUP=$RG" >> $GITHUB_ENV
           echo "LOCATION=$LOC" >> $GITHUB_ENV
-          echo "EH namespace=$NS | RG=$RG | region=$LOC"
+          # Si vnet_rg non fourni, on utilise RG déduit
+          if [ -z "${VNET_RG_INPUT:-}" ]; then
+            echo "VNET_RG=$RG" >> $GITHUB_ENV
+          else
+            echo "VNET_RG=$VNET_RG_INPUT" >> $GITHUB_ENV
+          fi
 
       - name: Download Dynatrace installer script (latest)
         run: |
@@ -173,7 +153,7 @@ jobs:
           [ -n "${TARGET_URL:-}" ] || { echo "::error::TARGET_URL vide"; exit 1; }
           [ -n "${TARGET_API_TOKEN:-}" ] || { echo "::error::TARGET_API_TOKEN vide"; exit 1; }
           [ -n "${EVENT_HUB_CONNECTION_STRING:-}" ] || { echo "::error::EVENT_HUB_CONNECTION_STRING vide"; exit 1; }
-          echo "OK: secrets/vars presents."
+          echo "OK: secrets/vars présents."
 
       - name: Deploy Dynatrace Azure Log Forwarder
         env:
@@ -215,59 +195,41 @@ jobs:
           echo "function_app=$APP_NAME" >> $GITHUB_OUTPUT
           echo "Function App: $APP_NAME"
 
-      # ---------------------------
-      # Reseau: utiliser VNet existant ou le creer
-      # ---------------------------
+      # ---- Réseau : EXISTING ou CREATE (subnets inclus) ----
       - name: Prepare VNet and subnets (existing or create)
         shell: bash
         run: |
           set -euo pipefail
-          # RG du VNet: si non fourni, utiliser RG deduit
-          VNET_RG_INPUT='${{ github.event.inputs.vnet_rg }}'
-          if [ -n "$VNET_RG_INPUT" ]; then
-            VNET_RG="$VNET_RG_INPUT"
-          else
-            VNET_RG="$RESOURCE_GROUP"
-          fi
-          echo "VNET_RG=$VNET_RG" >> $GITHUB_ENV
-
-          echo "Verification du VNet $VNET_NAME dans $VNET_RG"
-          if [ "${{ github.event.inputs.network_mode }}" = "create" ]; then
-            # Creation du VNet + subnets si absents
+          echo "VNET_RG=$VNET_RG (mode=$NETWORK_MODE)"
+          if [ "$NETWORK_MODE" = "create" ]; then
             az network vnet show -g "$VNET_RG" -n "$VNET_NAME" >/dev/null 2>&1 || \
               az network vnet create -g "$VNET_RG" -n "$VNET_NAME" --location "$LOCATION" --address-prefixes "$VNET_ADDRESS_PREFIX"
-            # Subnet d integration
             az network vnet subnet show -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$INT_SUBNET_NAME" >/dev/null 2>&1 || \
               az network vnet subnet create -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$INT_SUBNET_NAME" --address-prefixes "$INT_SUBNET_PREFIX"
-            # Subnet du PE
             az network vnet subnet show -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$PE_SUBNET_NAME" >/dev/null 2>&1 || \
               az network vnet subnet create -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$PE_SUBNET_NAME" --address-prefixes "$PE_SUBNET_PREFIX"
-            # Desactiver policies sur subnet PE
             az network vnet subnet update -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$PE_SUBNET_NAME" --disable-private-endpoint-network-policies true >/dev/null
           else
-            # Mode existing
             if ! az network vnet show -g "$VNET_RG" -n "$VNET_NAME" >/dev/null 2>&1; then
-              echo "::error::VNet $VNET_NAME introuvable dans RG $VNET_RG. Repasse network_mode=create pour le creer."
+              echo "::error::VNet $VNET_NAME introuvable dans RG $VNET_RG. Repasse network_mode=create pour le créer."
               exit 1
             fi
-            # Subnets: creer si absents selon create_missing_subnets
             if ! az network vnet subnet show -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$INT_SUBNET_NAME" >/dev/null 2>&1; then
-              if [ "${{ github.event.inputs.create_missing_subnets }}" = "true" ]; then
+              if [ "$CREATE_MISSING_SUBNETS" = "true" ]; then
                 az network vnet subnet create -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$INT_SUBNET_NAME" --address-prefixes "$INT_SUBNET_PREFIX"
               else
-                echo "::error::Subnet $INT_SUBNET_NAME absent dans $VNET_NAME et creation interdite."
+                echo "::error::Subnet $INT_SUBNET_NAME absent et création interdite."
                 exit 1
               fi
             fi
             if ! az network vnet subnet show -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$PE_SUBNET_NAME" >/dev/null 2>&1; then
-              if [ "${{ github.event.inputs.create_missing_subnets }}" = "true" ]; then
+              if [ "$CREATE_MISSING_SUBNETS" = "true" ]; then
                 az network vnet subnet create -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$PE_SUBNET_NAME" --address-prefixes "$PE_SUBNET_PREFIX"
               else
-                echo "::error::Subnet $PE_SUBNET_NAME absent dans $VNET_NAME et creation interdite."
+                echo "::error::Subnet $PE_SUBNET_NAME absent et création interdite."
                 exit 1
               fi
             fi
-            # Desactiver policies sur subnet PE
             az network vnet subnet update -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$PE_SUBNET_NAME" --disable-private-endpoint-network-policies true >/dev/null
           fi
 
@@ -281,9 +243,7 @@ jobs:
             --vnet "/subscriptions/$SUBS_ID/resourceGroups/$VNET_RG/providers/Microsoft.Network/virtualNetworks/$VNET_NAME" \
             --subnet "$INT_SUBNET_NAME" || true
 
-      # ---------------------------
-      # Private Endpoint + Private DNS
-      # ---------------------------
+      # ---- Private Endpoint + Private DNS ----
       - name: Create Private Endpoint (idempotent)
         id: pe
         run: |
@@ -310,17 +270,15 @@ jobs:
         run: |
           set -euo pipefail
           SUBS_ID=$(az account show --query id -o tsv)
-          ZONE_RG="${PRIVATE_DNS_ZONE_RG:-$RESOURCE_GROUP}"
-          ZONE_NAME="${PRIVATE_DNS_ZONE_NAME:-privatelink.azurewebsites.net}"
+          ZONE_RG="$RESOURCE_GROUP"   # par défaut: RG de la Function / EventHub
+          ZONE_NAME="$PRIVATE_DNS_ZONE_NAME"
 
           if [ "${CREATE_PE_DNS}" = "true" ]; then
-            # Zone privee
             az network private-dns zone show -g "$ZONE_RG" -n "$ZONE_NAME" >/dev/null 2>&1 || \
               az network private-dns zone create -g "$ZONE_RG" -n "$ZONE_NAME"
 
-            # Lien VNet -> zone
             LINK_NAME="${DEPLOYMENT_NAME}-dnslink"
-            az network private-dns link vnet show -g "$ZONE_RG" -z "$ZONE_NAME" -n "$LINK_NAME" >/devnull 2>&1 || \
+            az network private-dns link vnet show -g "$ZONE_RG" -z "$ZONE_NAME" -n "$LINK_NAME" >/dev/null 2>&1 || \
               az network private-dns link vnet create \
                 -g "$ZONE_RG" \
                 -n "$LINK_NAME" \
@@ -328,7 +286,6 @@ jobs:
                 -v "/subscriptions/$SUBS_ID/resourceGroups/$VNET_RG/providers/Microsoft.Network/virtualNetworks/$VNET_NAME" \
                 -e false
 
-            # Associer le PE a la zone
             az network private-endpoint dns-zone-group show \
               --endpoint-name "$PE_NAME" -g "$VNET_RG" -n "${DEPLOYMENT_NAME}-pe-dnsgrp" >/dev/null 2>&1 || \
               az network private-endpoint dns-zone-group create \
@@ -338,13 +295,13 @@ jobs:
                 --zone-name "${DEPLOYMENT_NAME}-pe-dnszone" \
                 --private-dns-zone "/subscriptions/$SUBS_ID/resourceGroups/$ZONE_RG/providers/Microsoft.Network/privateDnsZones/$ZONE_NAME"
           else
-            echo "CREATE_PE_DNS=false, etape DNS ignoree."
+            echo "CREATE_PE_DNS=false, étape DNS ignorée."
           fi
 
       - name: Summary
         run: |
-          echo "OK: Deploiement termine."
-          echo "RG App: $RESOURCE_GROUP | Region: $LOCATION"
+          echo "✅ Déploiement terminé."
+          echo "RG App: $RESOURCE_GROUP | Région: $LOCATION"
           echo "Function App: $FUNCTION_APP"
           echo "VNet RG: $VNET_RG | VNet: $VNET_NAME"
           echo "Subnets: $INT_SUBNET_NAME, $PE_SUBNET_NAME"
