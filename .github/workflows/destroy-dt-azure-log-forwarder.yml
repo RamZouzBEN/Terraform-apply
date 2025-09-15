@@ -27,86 +27,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------- Diagnostics (presence des secrets/vars) ----------
-      - name: Diagnostics – presence
-        shell: bash
-        run: |
-          set -euo pipefail
-          test_secret="${{ secrets.AZURE_CREDENTIALS }}"
-          test_var="${{ vars.AZURE_CREDENTIALS }}"
-          echo "Has secrets.AZURE_CREDENTIALS: $([ -n "$test_secret" ] && [ "$test_secret" != "null" ] && echo yes || echo no)"
-          echo "Has vars.AZURE_CREDENTIALS: $([ -n "$test_var" ] && [ "$test_var" != "null" ] && echo yes || echo no)"
-          has_oidc="no"
-          [ -n "${{ secrets.AZURE_CLIENT_ID }}" ] && [ "${{ secrets.AZURE_CLIENT_ID }}" != "null" ] && \
-          [ -n "${{ secrets.AZURE_TENANT_ID }}" ] && [ "${{ secrets.AZURE_TENANT_ID }}" != "null" ] && \
-          [ -n "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ] && [ "${{ secrets.AZURE_SUBSCRIPTION_ID }}" != "null" ] && has_oidc="yes"
-          echo "Has OIDC trio: $has_oidc"
-
-      # ---------- Choix du mode d auth (SPN JSON depuis secrets/vars, ou OIDC) ----------
-      - name: Decide auth mode (SPN JSON from secrets/vars, else OIDC)
-        id: auth
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # 1) Essayer secrets.AZURE_CREDENTIALS puis vars.AZURE_CREDENTIALS
-          RAW="${{ secrets.AZURE_CREDENTIALS }}"
-          SRC="secrets"
-          if [ -z "$RAW" ] || [ "$RAW" = "null" ]; then
-            RAW="${{ vars.AZURE_CREDENTIALS }}"
-            SRC="vars"
-          fi
-
-          MODE=""
-          if [ -n "$RAW" ] && [ "$RAW" != "null" ]; then
-            echo "$RAW" | grep -q '"clientId"' && \
-            echo "$RAW" | grep -q '"clientSecret"' && \
-            echo "$RAW" | grep -q '"subscriptionId"' && \
-            echo "$RAW" | grep -q '"tenantId"' && MODE="spn" || MODE=""
-          fi
-
-          if [ -z "$MODE" ]; then
-            CID='${{ secrets.AZURE_CLIENT_ID }}'
-            TID='${{ secrets.AZURE_TENANT_ID }}'
-            SID='${{ secrets.AZURE_SUBSCRIPTION_ID }}'
-            if [ -n "$CID" ] && [ "$CID" != "null" ] && [ -n "$TID" ] && [ "$TID" != "null" ] && [ -n "$SID" ] && [ "$SID" != "null" ]; then
-              MODE="oidc"
-            fi
-          fi
-
-          if [ "$MODE" = "spn" ]; then
-            {
-              echo "AZ_CRED_JSON<<EOF"
-              echo "$RAW"
-              echo "EOF"
-            } >> "$GITHUB_ENV"
-            echo "mode=spn" >> "$GITHUB_OUTPUT"
-            echo "source=$SRC" >> "$GITHUB_OUTPUT"
-            echo "Auth mode: SPN JSON from $SRC (length=${#RAW})"
-          elif [ "$MODE" = "oidc" ]; then
-            echo "mode=oidc" >> "$GITHUB_OUTPUT"
-            echo "source=oidc" >> "$GITHUB_OUTPUT"
-            echo "Auth mode: OIDC"
-          else
-            printf '%s\n' "::error::No authentication mode found. Provide AZURE_CREDENTIALS JSON (camelCase) or OIDC secrets AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID."
-            exit 1
-          fi
-
       - name: Azure login (Service Principal JSON)
         if: ${{ steps.auth.outputs.mode == 'spn' }}
-        uses: azure/login@v2
-        with:
-          credentials: ${{ env.AZ_CRED_JSON }}
-
-      - name: Azure login (OIDC)
-        if: ${{ steps.auth.outputs.mode == 'oidc' }}
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      # ---------------------------------------------------
 
       - name: Install CLI deps
         run: |
