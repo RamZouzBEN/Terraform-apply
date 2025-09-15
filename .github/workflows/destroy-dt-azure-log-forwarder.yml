@@ -33,6 +33,7 @@ jobs:
         with:
           # Utilise le SPN JSON (Option A). Si tu es en OIDC, remplace par client-id/tenant-id/subscription-id.
           credentials: ${{ secrets.AZURE_CREDENTIALS }}
+          enable-AzPSSession: true
 
       - name: Install CLI deps
         run: |
