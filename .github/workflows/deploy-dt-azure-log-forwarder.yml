@@ -261,37 +261,59 @@ jobs:
           echo "pe_name=$PE_NAME" >> $GITHUB_OUTPUT
           echo "PE_NAME=$PE_NAME" >> $GITHUB_ENV
 
-      - name: Attach Private DNS zone group (privatelink.azurewebsites.net)
+      - name: Attach Private DNS zone group (privatelink.azurewebsites.net) — safe reuse
+        shell: bash
         run: |
           set -euo pipefail
           SUBS_ID=$(az account show --query id -o tsv)
-          ZONE_RG="$RESOURCE_GROUP"
-          ZONE_NAME="$PRIVATE_DNS_ZONE_NAME"
+          VNET_ID="/subscriptions/$SUBS_ID/resourceGroups/$VNET_RG/providers/Microsoft.Network/virtualNetworks/$VNET_NAME"
+          ZONE_NAME="privatelink.azurewebsites.net"
 
-          if [ "${CREATE_PE_DNS}" = "true" ]; then
+          # 1) Chercher une zone existante de ce nom DEJA liee a ce VNet (peu importe le RG)
+          EXISTING_ZONE_RG=""
+          EXISTING_LINK_NAME=""
+          while IFS=$'\t' read -r ZRG ZNAME; do
+            [ -n "$ZRG" ] || continue
+            # Liste des liens pour cette zone
+            LN=$(az network private-dns link vnet list -g "$ZRG" -z "$ZONE_NAME" \
+                  --query "[?virtualNetwork.id=='$VNET_ID'] | [0].name" -o tsv 2>/dev/null || true)
+            if [ -n "$LN" ] && [ "$LN" != "null" ]; then
+              EXISTING_ZONE_RG="$ZRG"
+              EXISTING_LINK_NAME="$LN"
+              break
+            fi
+          done < <(az network private-dns zone list --query "[?name=='$ZONE_NAME'].[resourceGroup,name]" -o tsv)
+
+          if [ -n "$EXISTING_ZONE_RG" ]; then
+            echo "Reusing existing Private DNS zone '$ZONE_NAME' in RG '$EXISTING_ZONE_RG' (link: $EXISTING_LINK_NAME)."
+            ZONE_RG="$EXISTING_ZONE_RG"
+          else
+            # 2) Aucun lien existant -> utiliser RG par defaut (RESOURCE_GROUP) et creer zone si absente, puis lier le VNet
+            ZONE_RG="$RESOURCE_GROUP"
             az network private-dns zone show -g "$ZONE_RG" -n "$ZONE_NAME" >/dev/null 2>&1 || \
               az network private-dns zone create -g "$ZONE_RG" -n "$ZONE_NAME"
-
             LINK_NAME="${DEPLOYMENT_NAME}-dnslink"
             az network private-dns link vnet show -g "$ZONE_RG" -z "$ZONE_NAME" -n "$LINK_NAME" >/dev/null 2>&1 || \
               az network private-dns link vnet create \
                 -g "$ZONE_RG" \
                 -n "$LINK_NAME" \
                 -z "$ZONE_NAME" \
-                -v "/subscriptions/$SUBS_ID/resourceGroups/$VNET_RG/providers/Microsoft.Network/virtualNetworks/$VNET_NAME" \
+                -v "$VNET_ID" \
                 -e false
-
-            az network private-endpoint dns-zone-group show \
-              --endpoint-name "$PE_NAME" -g "$VNET_RG" -n "${DEPLOYMENT_NAME}-pe-dnsgrp" >/dev/null 2>&1 || \
-              az network private-endpoint dns-zone-group create \
-                --endpoint-name "$PE_NAME" \
-                -g "$VNET_RG" \
-                -n "${DEPLOYMENT_NAME}-pe-dnsgrp" \
-                --zone-name "${DEPLOYMENT_NAME}-pe-dnszone" \
-                --private-dns-zone "/subscriptions/$SUBS_ID/resourceGroups/$ZONE_RG/providers/Microsoft.Network/privateDnsZones/$ZONE_NAME"
-          else
-            echo "CREATE_PE_DNS=false, etape DNS ignoree."
           fi
+
+          # 3) Associer le Private Endpoint a LA MEME zone (ZONE_RG)
+          PE_NAME="${DEPLOYMENT_NAME}-func-pe"
+          az network private-endpoint dns-zone-group show \
+            --endpoint-name "$PE_NAME" -g "$VNET_RG" -n "${DEPLOYMENT_NAME}-pe-dnsgrp" >/dev/null 2>&1 || \
+            az network private-endpoint dns-zone-group create \
+              --endpoint-name "$PE_NAME" \
+              -g "$VNET_RG" \
+              -n "${DEPLOYMENT_NAME}-pe-dnsgrp" \
+              --zone-name "${DEPLOYMENT_NAME}-pe-dnszone" \
+              --private-dns-zone "/subscriptions/$SUBS_ID/resourceGroups/$ZONE_RG/providers/Microsoft.Network/privateDnsZones/$ZONE_NAME"
+
+          echo "ZONE_RG=$ZONE_RG" >> $GITHUB_ENV
 
       - name: Summary
         run: |
