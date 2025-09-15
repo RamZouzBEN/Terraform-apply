@@ -1,0 +1,150 @@
+name: Destroy Dynatrace Azure Log Forwarder
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_name:
+        description: "Préfixe du déploiement (ex: dtlfparis01)"
+        required: true
+      delete_empty_plan:
+        description: "Supprimer l'App Service Plan s'il est vide"
+        required: true
+        default: "true"
+      delete_app_insights:
+        description: "Supprimer Application Insights (si présent, par préfixe)"
+        required: true
+        default: "false"
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    # Si tes secrets sont rangés dans un Environment (ex: 'prod'), dé-commente la ligne suivante :
+    # environment: prod
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          # Utilise le SPN JSON (Option A). Si tu es en OIDC, remplace par client-id/tenant-id/subscription-id.
+          credentials: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Install CLI deps
+        run: |
+          az version
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      # --- Charger secrets/vars (fallback) ---
+      - name: Load Dynatrace & EH settings (secrets → vars)
+        run: |
+          set -euo pipefail
+          TARGET_URL="${{ secrets.DT_TARGET_URL }}"; [ -n "$TARGET_URL" ] || TARGET_URL="${{ vars.DT_TARGET_URL }}"
+          EVENT_HUB_CONNECTION_STRING="${{ secrets.EVENT_HUB_CONNECTION_STRING }}"; [ -n "$EVENT_HUB_CONNECTION_STRING" ] || EVENT_HUB_CONNECTION_STRING="${{ vars.EVENT_HUB_CONNECTION_STRING }}"
+
+          [ -n "$EVENT_HUB_CONNECTION_STRING" ] || { echo "::error::EVENT_HUB_CONNECTION_STRING manquant (Secret ou Variable)"; exit 1; }
+
+          echo "DEPLOYMENT_NAME=${{ github.event.inputs.deployment_name }}" >> $GITHUB_ENV
+          echo "TARGET_URL=$TARGET_URL" >> $GITHUB_ENV
+          echo "EVENT_HUB_CONNECTION_STRING=$EVENT_HUB_CONNECTION_STRING" >> $GITHUB_ENV
+          echo "DELETE_EMPTY_PLAN=${{ github.event.inputs.delete_empty_plan }}" >> $GITHUB_ENV
+          echo "DELETE_APP_INSIGHTS=${{ github.event.inputs.delete_app_insights }}" >> $GITHUB_ENV
+
+      # --- Résoudre le RG / région via le namespace Event Hubs (comme au deploy) ---
+      - name: Resolve Resource Group & Location from Event Hubs
+        id: eh
+        run: |
+          set -euo pipefail
+          NS=$(echo "$EVENT_HUB_CONNECTION_STRING" | sed -n 's/.*Endpoint=sb:\/\/\([^\.]*\)\..*/\1/p' || true)
+          if [ -z "$NS" ]; then
+            echo "::error::Impossible d'extraire le namespace Event Hubs depuis la chaîne."; exit 1
+          fi
+
+          EH_JSON=$(az resource list --resource-type "Microsoft.EventHub/namespaces" -n "$NS" -o json)
+          RG=$(echo "$EH_JSON" | jq -r '.[0].resourceGroup // empty')
+          LOC=$(echo "$EH_JSON" | jq -r '.[0].location // empty')
+
+          if [ -z "$RG" ] || [ -z "$LOC" ]; then
+            echo "::error::Namespace '$NS' introuvable dans la souscription pour ce SPN."; exit 1
+          fi
+
+          echo "RESOURCE_GROUP=$RG" >> $GITHUB_ENV
+          echo "LOCATION=$LOC" >> $GITHUB_ENV
+          echo "EH namespace=$NS | RG=$RG | region=$LOC"
+
+      # --- Retrouver la Function App (par préfixe) ---
+      - name: Resolve Function App by prefix
+        id: resolveapp
+        run: |
+          set -euo pipefail
+          APP_NAME=$(az functionapp list -g "$RESOURCE_GROUP" --query "[?starts_with(name, '${{ env.DEPLOYMENT_NAME }}')].name | [0]" -o tsv)
+          if [ -z "$APP_NAME" ] || [ "$APP_NAME" = "null" ]; then
+            echo "::warning::Aucune Function App ne commence par '${{ env.DEPLOYMENT_NAME }}' dans RG '$RESOURCE_GROUP'. Rien à détruire côté app."
+            echo "function_app=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "FUNCTION_APP=$APP_NAME" >> $GITHUB_ENV
+          echo "function_app=$APP_NAME" >> $GITHUB_OUTPUT
+
+          PLAN_ID=$(az functionapp show -g "$RESOURCE_GROUP" -n "$APP_NAME" --query "serverFarmId" -o tsv)
+          APP_ID=$(az functionapp show -g "$RESOURCE_GROUP" -n "$APP_NAME" --query "id" -o tsv)
+          echo "PLAN_ID=$PLAN_ID" >> $GITHUB_ENV
+          echo "APP_ID=$APP_ID" >> $GITHUB_ENV
+          echo "App résolue: $APP_NAME"
+
+      # --- DNS zone group -> detach (si existe) ---
+      - name: Detach DNS zone group from Private Endpoint (if exists)
+        if: ${{ steps.resolveapp.outputs.function_app }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          PE_NAME="${{ env.DEPLOYMENT_NAME }}-func-pe"
+          DNS_GRP="${{ env.DEPLOYMENT_NAME }}-pe-dnsgrp"
+          echo "Suppression DNS zone group '$DNS_GRP' du PE '$PE_NAME' (si présent)"
+          az network private-endpoint dns-zone-group delete \
+            --endpoint-name "$PE_NAME" \
+            -g "$RESOURCE_GROUP" \
+            -n "$DNS_GRP" \
+            --yes
+
+      # --- Private Endpoint -> delete (idempotent) ---
+      - name: Delete Private Endpoint (if exists)
+        if: ${{ steps.resolveapp.outputs.function_app }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          PE_NAME="${{ env.DEPLOYMENT_NAME }}-func-pe"
+          echo "Suppression du Private Endpoint '$PE_NAME' (si présent)"
+          az network private-endpoint show -n "$PE_NAME" -g "$RESOURCE_GROUP" >/dev/null 2>&1 || exit 0
+          az network private-endpoint delete -n "$PE_NAME" -g "$RESOURCE_GROUP" --yes
+
+      # --- VNet integration -> remove (idempotent) ---
+      - name: Detach VNet integration
+        if: ${{ steps.resolveapp.outputs.function_app }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "Retrait de l'intégration VNet sur $FUNCTION_APP (si configurée)"
+          az functionapp vnet-integration remove -g "$RESOURCE_GROUP" -n "$FUNCTION_APP"
+
+      # --- Function App -> delete ---
+      - name: Delete Function App
+        if: ${{ steps.resolveapp.outputs.function_app }}
+        run: |
+          set -euo pipefail
+          echo "Suppression Function App $FUNCTION_APP"
+          az functionapp delete -g "$RESOURCE_GROUP" -n "$FUNCTION_APP"
+
+      # --- (Optionnel) Application Insights -> delete par préfixe ---
+      - name: Delete Application Insights by prefix (optional)
+        if: ${{ env.DELETE_APP_INSIGHTS == 'true' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          INSIGHTS
