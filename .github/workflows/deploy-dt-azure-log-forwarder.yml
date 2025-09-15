@@ -7,38 +7,36 @@ on:
         description: "Nom (3-20, minuscules/chiffres)"
         required: true
       enable_self_monitoring:
-        description: "Activer la télémétrie self-monitoring"
+        description: "Activer la telemetrie self-monitoring"
         required: true
         default: "false"
       filter_config:
         description: "OPTIONNEL - Filtres (ex: FILTER.GLOBAL.MIN_LOG_LEVEL=Warning)"
         required: false
-
-      # ---- Réseau : EXISTING ou CREATE (≤10 inputs au total) ----
       network_mode:
-        description: "existing (utiliser VNet existant) ou create (créer VNet)"
+        description: "existing (utiliser VNet existant) ou create (creer VNet)"
         required: true
         default: "existing"
       vnet_name:
-        description: "Nom du VNet à utiliser/créer"
+        description: "Nom du VNet a utiliser/creer"
         required: true
       vnet_rg:
-        description: "RG du VNet (vide = RG déduit Event Hub)"
+        description: "RG du VNet (vide = RG deduit Event Hub)"
         required: false
       int_subnet_name:
-        description: "Subnet d'intégration VNet (sortant). Si absent et CREATE, il sera créé."
+        description: "Subnet d'integration VNet (sortant)"
         required: true
         default: "snet-appsvc-int"
       pe_subnet_name:
-        description: "Subnet Private Endpoint (entrant). Si absent et CREATE, il sera créé."
+        description: "Subnet Private Endpoint (entrant)"
         required: true
         default: "snet-pe"
       create_missing_subnets:
-        description: "Créer les subnets manquants (en mode existing)"
+        description: "Creer les subnets manquants (en mode existing)"
         required: true
         default: "true"
       create_private_dns_zone_group:
-        description: "Créer l'association Private DNS zone (privatelink.azurewebsites.net)"
+        description: "Creer l'association Private DNS zone (privatelink.azurewebsites.net)"
         required: true
         default: "true"
 
@@ -53,11 +51,61 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Auth via SPN JSON. (Si tu veux OIDC, remplace avec client-id/tenant-id/subscription-id)
-      - name: Azure login
+      # --- Auth auto: SPN JSON via secrets/vars -> creds:, sinon OIDC ---
+      - name: Decide auth mode (SPN JSON from secrets/vars, else OIDC)
+        id: auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW="${{ secrets.AZURE_CREDENTIALS }}"
+          SRC="secrets"
+          if [ -z "$RAW" ] || [ "$RAW" = "null" ]; then
+            RAW="${{ vars.AZURE_CREDENTIALS }}"
+            SRC="vars"
+          fi
+          MODE=""
+          if [ -n "$RAW" ] && [ "$RAW" != "null" ]; then
+            echo "$RAW" | grep -q '"clientId"' && \
+            echo "$RAW" | grep -q '"clientSecret"' && \
+            echo "$RAW" | grep -q '"subscriptionId"' && \
+            echo "$RAW" | grep -q '"tenantId"' && MODE="spn" || MODE=""
+          fi
+          if [ -z "$MODE" ]; then
+            CID='${{ secrets.AZURE_CLIENT_ID }}'
+            TID='${{ secrets.AZURE_TENANT_ID }}'
+            SID='${{ secrets.AZURE_SUBSCRIPTION_ID }}'
+            if [ -n "$CID" ] && [ "$CID" != "null" ] && [ -n "$TID" ] && [ "$TID" != "null" ] && [ -n "$SID" ] && [ "$SID" != "null" ]; then
+              MODE="oidc"
+            fi
+          fi
+          if [ "$MODE" = "spn" ]; then
+            {
+              echo "AZ_CRED_JSON<<EOF"
+              echo "$RAW"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+            echo "mode=spn" >> "$GITHUB_OUTPUT"
+            echo "source=$SRC" >> "$GITHUB_OUTPUT"
+          elif [ "$MODE" = "oidc" ]; then
+            echo "mode=oidc" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "::error::Aucun mode d'auth detecte. Fournis AZURE_CREDENTIALS (JSON camelCase) ou OIDC (AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID)."
+            exit 1
+          fi
+
+      - name: Azure login (Service Principal JSON)
+        if: ${{ steps.auth.outputs.mode == 'spn' }}
         uses: azure/login@v2
         with:
-          credentials: ${{ secrets.AZURE_CREDENTIALS }}
+          creds: ${{ env.AZ_CRED_JSON }}
+
+      - name: Azure login (OIDC)
+        if: ${{ steps.auth.outputs.mode == 'oidc' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Install CLI deps
         run: |
@@ -72,7 +120,7 @@ jobs:
           set -euo pipefail
 
           DEPLOYMENT_NAME='${{ github.event.inputs.deployment_name }}'
-          [[ "$DEPLOYMENT_NAME" =~ ^[a-z0-9]{3,20}$ ]] || { echo "::error::deployment_name doit être 3-20, minuscules/chiffres"; exit 1; }
+          [[ "$DEPLOYMENT_NAME" =~ ^[a-z0-9]{3,20}$ ]] || { echo "::error::deployment_name doit etre 3-20, minuscules/chiffres"; exit 1; }
           echo "DEPLOYMENT_NAME=$DEPLOYMENT_NAME" >> $GITHUB_ENV
 
           TARGET_URL="${{ secrets.DT_TARGET_URL }}"; [ -n "$TARGET_URL" ] || TARGET_URL='${{ vars.DT_TARGET_URL }}'
@@ -87,7 +135,6 @@ jobs:
           echo "TARGET_API_TOKEN=$TARGET_API_TOKEN" >> $GITHUB_ENV
           echo "EVENT_HUB_CONNECTION_STRING=$EH_CS" >> $GITHUB_ENV
 
-          # ActiveGate auto si :port/e/
           if echo "$TARGET_URL" | grep -qE ':[0-9]+/e/'; then
             echo "USE_EXISTING_ACTIVE_GATE=true" >> $GITHUB_ENV
           else
@@ -95,7 +142,6 @@ jobs:
           fi
           echo "REQUIRE_VALID_CERTIFICATE=true" >> $GITHUB_ENV
 
-          # Optionnels
           if [ -n "${{ github.event.inputs.filter_config }}" ]; then
             printf 'FILTER_CONFIG=%s\n' "${{ github.event.inputs.filter_config }}" >> $GITHUB_ENV
           fi
@@ -103,7 +149,6 @@ jobs:
             echo "SFM_ENABLED=true" >> $GITHUB_ENV
           fi
 
-          # Réseau (≤10 inputs)
           echo "NETWORK_MODE=${{ github.event.inputs.network_mode }}" >> $GITHUB_ENV
           echo "VNET_NAME=${{ github.event.inputs.vnet_name }}" >> $GITHUB_ENV
           echo "VNET_RG_INPUT=${{ github.event.inputs.vnet_rg }}" >> $GITHUB_ENV
@@ -112,21 +157,20 @@ jobs:
           echo "CREATE_MISSING_SUBNETS=${{ github.event.inputs.create_missing_subnets }}" >> $GITHUB_ENV
           echo "CREATE_PE_DNS=${{ github.event.inputs.create_private_dns_zone_group }}" >> $GITHUB_ENV
 
-          # Prefix par défaut si on doit créer (pas en inputs pour rester ≤10)
+          # Defaults si creation necessaire
           echo "VNET_ADDRESS_PREFIX=10.200.0.0/16" >> $GITHUB_ENV
           echo "INT_SUBNET_PREFIX=10.200.1.0/24" >> $GITHUB_ENV
           echo "PE_SUBNET_PREFIX=10.200.2.0/24" >> $GITHUB_ENV
-          # DNS privé : RG = RG déduit, zone = privatelink.azurewebsites.net
           echo "PRIVATE_DNS_ZONE_NAME=privatelink.azurewebsites.net" >> $GITHUB_ENV
 
-      # ---- Déduire RG/region depuis Event Hubs ----
+      # ---- Deduction RG/region via Event Hubs ----
       - name: Resolve Resource Group & Location from Event Hubs
         id: eh
         shell: bash
         run: |
           set -euo pipefail
           NS="$(echo "$EVENT_HUB_CONNECTION_STRING" | sed -n 's/.*Endpoint=sb:\/\/\([^\.]*\)\..*/\1/p' || true)"
-          [ -n "$NS" ] || { echo "::error::Impossible d extraire le namespace Event Hubs depuis la chaîne."; exit 1; }
+          [ -n "$NS" ] || { echo "::error::Impossible d extraire le namespace Event Hubs depuis la chaine."; exit 1; }
 
           EH_JSON="$(az resource list --resource-type Microsoft.EventHub/namespaces -n "$NS" -o json)"
           RG="$(echo "$EH_JSON" | jq -r '.[0].resourceGroup // empty')"
@@ -135,7 +179,6 @@ jobs:
 
           echo "RESOURCE_GROUP=$RG" >> $GITHUB_ENV
           echo "LOCATION=$LOC" >> $GITHUB_ENV
-          # Si vnet_rg non fourni, on utilise RG déduit
           if [ -z "${VNET_RG_INPUT:-}" ]; then
             echo "VNET_RG=$RG" >> $GITHUB_ENV
           else
@@ -153,7 +196,7 @@ jobs:
           [ -n "${TARGET_URL:-}" ] || { echo "::error::TARGET_URL vide"; exit 1; }
           [ -n "${TARGET_API_TOKEN:-}" ] || { echo "::error::TARGET_API_TOKEN vide"; exit 1; }
           [ -n "${EVENT_HUB_CONNECTION_STRING:-}" ] || { echo "::error::EVENT_HUB_CONNECTION_STRING vide"; exit 1; }
-          echo "OK: secrets/vars présents."
+          echo "OK: secrets/vars presents."
 
       - name: Deploy Dynatrace Azure Log Forwarder
         env:
@@ -195,7 +238,7 @@ jobs:
           echo "function_app=$APP_NAME" >> $GITHUB_OUTPUT
           echo "Function App: $APP_NAME"
 
-      # ---- Réseau : EXISTING ou CREATE (subnets inclus) ----
+      # ---- Reseau: EXISTING ou CREATE ----
       - name: Prepare VNet and subnets (existing or create)
         shell: bash
         run: |
@@ -211,14 +254,14 @@ jobs:
             az network vnet subnet update -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$PE_SUBNET_NAME" --disable-private-endpoint-network-policies true >/dev/null
           else
             if ! az network vnet show -g "$VNET_RG" -n "$VNET_NAME" >/dev/null 2>&1; then
-              echo "::error::VNet $VNET_NAME introuvable dans RG $VNET_RG. Repasse network_mode=create pour le créer."
+              echo "::error::VNet $VNET_NAME introuvable dans RG $VNET_RG. Repasse network_mode=create pour le creer."
               exit 1
             fi
             if ! az network vnet subnet show -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$INT_SUBNET_NAME" >/dev/null 2>&1; then
               if [ "$CREATE_MISSING_SUBNETS" = "true" ]; then
                 az network vnet subnet create -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$INT_SUBNET_NAME" --address-prefixes "$INT_SUBNET_PREFIX"
               else
-                echo "::error::Subnet $INT_SUBNET_NAME absent et création interdite."
+                echo "::error::Subnet $INT_SUBNET_NAME absent et creation interdite."
                 exit 1
               fi
             fi
@@ -226,7 +269,7 @@ jobs:
               if [ "$CREATE_MISSING_SUBNETS" = "true" ]; then
                 az network vnet subnet create -g "$VNET_RG" --vnet-name "$VNET_NAME" -n "$PE_SUBNET_NAME" --address-prefixes "$PE_SUBNET_PREFIX"
               else
-                echo "::error::Subnet $PE_SUBNET_NAME absent et création interdite."
+                echo "::error::Subnet $PE_SUBNET_NAME absent et creation interdite."
                 exit 1
               fi
             fi
@@ -270,7 +313,7 @@ jobs:
         run: |
           set -euo pipefail
           SUBS_ID=$(az account show --query id -o tsv)
-          ZONE_RG="$RESOURCE_GROUP"   # par défaut: RG de la Function / EventHub
+          ZONE_RG="$RESOURCE_GROUP"
           ZONE_NAME="$PRIVATE_DNS_ZONE_NAME"
 
           if [ "${CREATE_PE_DNS}" = "true" ]; then
@@ -295,13 +338,13 @@ jobs:
                 --zone-name "${DEPLOYMENT_NAME}-pe-dnszone" \
                 --private-dns-zone "/subscriptions/$SUBS_ID/resourceGroups/$ZONE_RG/providers/Microsoft.Network/privateDnsZones/$ZONE_NAME"
           else
-            echo "CREATE_PE_DNS=false, étape DNS ignorée."
+            echo "CREATE_PE_DNS=false, etape DNS ignoree."
           fi
 
       - name: Summary
         run: |
-          echo "✅ Déploiement terminé."
-          echo "RG App: $RESOURCE_GROUP | Région: $LOCATION"
+          echo "✅ Deploiement termine."
+          echo "RG App: $RESOURCE_GROUP | Region: $LOCATION"
           echo "Function App: $FUNCTION_APP"
           echo "VNet RG: $VNET_RG | VNet: $VNET_NAME"
           echo "Subnets: $INT_SUBNET_NAME, $PE_SUBNET_NAME"
