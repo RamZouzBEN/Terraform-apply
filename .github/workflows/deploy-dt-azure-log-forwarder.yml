@@ -36,7 +36,7 @@ on:
         required: true
         default: "true"
       create_private_dns_zone_group:
-        description: "Creer l'association Private DNS zone (privatelink.azurewebsites.net)"
+        description: "Creer l'association Private DNS zone (dynprivatelink.azurewebsites.net)"
         required: true
         default: "true"
 
@@ -113,7 +113,7 @@ jobs:
           echo "VNET_ADDRESS_PREFIX=10.0.0.0/16" >> $GITHUB_ENV
           echo "INT_SUBNET_PREFIX=10.0.3.0/24" >> $GITHUB_ENV
           echo "PE_SUBNET_PREFIX=10.0.4.0/24" >> $GITHUB_ENV
-          echo "PRIVATE_DNS_ZONE_NAME=privatelink.azurewebsites.net" >> $GITHUB_ENV
+          echo "PRIVATE_DNS_ZONE_NAME=dynprivatelink.azurewebsites.net" >> $GITHUB_ENV
 
       # ---- Deduction RG/region via Event Hubs ----
       - name: Resolve Resource Group & Location from Event Hubs
@@ -261,13 +261,13 @@ jobs:
           echo "pe_name=$PE_NAME" >> $GITHUB_OUTPUT
           echo "PE_NAME=$PE_NAME" >> $GITHUB_ENV
 
-      - name: Attach Private DNS zone group (privatelink.azurewebsites.net) — safe reuse
+      - name: Attach Private DNS zone group (dynprivatelink.azurewebsites.net) — safe reuse
         shell: bash
         run: |
           set -euo pipefail
           SUBS_ID=$(az account show --query id -o tsv)
           VNET_ID="/subscriptions/$SUBS_ID/resourceGroups/$VNET_RG/providers/Microsoft.Network/virtualNetworks/$VNET_NAME"
-          ZONE_NAME="privatelink.azurewebsites.net"
+          ZONE_NAME="dynprivatelink.azurewebsites.net"
 
           # 1) Chercher une zone existante de ce nom DEJA liee a ce VNet (peu importe le RG)
           EXISTING_ZONE_RG=""
